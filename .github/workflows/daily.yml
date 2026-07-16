@@ -1,0 +1,53 @@
+name: StockScout Daily Batch
+
+# 東証・NYSE/NASDAQ の引け後、日本時間の早朝に実行する想定。
+# J-Quants は毎日17:00頃にその日の株価を配信するため、UTC 21:00(JST翌6:00)に設定。
+# 実データでの初回投入時は workflow_dispatch で手動実行し、挙動を必ず確認すること。
+on:
+  schedule:
+    - cron: "0 21 * * 1-5"  # 平日 UTC21:00 = JST翌朝6:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 共有ロジックを StockScout.jsx から自動抽出
+        run: node scripts/extract-logic.mjs
+
+      - name: 日次バッチ実行(J-Quants + Stooq + GAS → snapshot.json / history.json)
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          GAS_US_STOCK_PROXY_URL: ${{ secrets.GAS_US_STOCK_PROXY_URL }}
+        run: node batch/build-snapshot.mjs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Discord 通知(強い推薦・保有銘柄シグナル)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 notify_discord.py
+
+      - name: 生成物をコミット
+        # main ブランチへの push が、Vercel の自動デプロイをトリガーする。
+        # つまりこのコミットが完了すると、数分後にはサイトの表示データも
+        # 最新化される(Vercel 側で追加設定は不要)。
+        run: |
+          git config user.name "stockscout-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add public/data/snapshot.json public/data/history.json
+          git add -f .state/notified.json
+          git diff --cached --quiet || git commit -m "chore: daily snapshot $(date -u +%Y-%m-%d)"
+          git push
