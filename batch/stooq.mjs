@@ -1,37 +1,59 @@
 /**
- * stooq.mjs — 米国株の日次ヒストリカル取得(無料・認証不要)
+ * stooq.mjs — 米国株の日次ヒストリカル取得
  * ----------------------------------------------------------------------------
- * Stooq (https://stooq.com) は無料でCSV形式の日次OHLCVを配信している。
- * GOOGLEFINANCE の historical 取得は不安定さが指摘されているため、
- * ヒストリカルは Stooq、当日の現在値・PER等は GAS+GOOGLEFINANCE、
- * という役割分担にしている(README参照)。
- *
- * ■ 未検証の注意
- *   開発サンドボックスのネットワーク制限で stooq.com への接続を実際に
- *   試せていない。URLフォーマットは公開情報に基づく。導入時は必ず
- *   1銘柄でスモークテストすること。
+ * Stooq が JavaScript チャレンジによるbot保護を導入したため、
+ * Yahoo Finance の chart API に切り替え(無料・認証不要)。
+ * エンドポイント: https://query1.finance.yahoo.com/v8/finance/chart/{TICKER}
  */
 
-const BASE = "https://stooq.com/q/d/l/";
+const YF_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+  "Accept": "application/json",
+};
 
 /**
+ * Yahoo Finance から最大5年分の日次OHLCVを取得する。
  * @param {string} ticker - 例: "aapl"
  * @returns {Promise<Array<{date,o,h,l,c,v}>>}
  */
 export async function fetchStooqHistory(ticker) {
-  const url = `${BASE}?s=${ticker.toLowerCase()}.us&i=d`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Stooq取得失敗 ${ticker}: HTTP ${res.status}`);
-  const text = await res.text();
-  if (text.startsWith("<") || /No data/i.test(text)) {
-    throw new Error(`Stooq: ${ticker} のデータが見つかりません(ティッカー誤りの可能性)`);
+  // 関数名はbuild-snapshot側との互換性のため維持
+  const symbol = ticker.toUpperCase();
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5y`;
+  let res = await fetch(url, { headers: YF_HEADERS });
+
+  // query1 が失敗した場合 query2 にフォールバック
+  if (!res.ok) {
+    const url2 = `https://query2.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5y`;
+    res = await fetch(url2, { headers: YF_HEADERS });
   }
-  const lines = text.trim().split("\n").slice(1); // ヘッダ行を除く
+  if (!res.ok) throw new Error(`Yahoo Finance取得失敗 ${ticker}: HTTP ${res.status}`);
+
+  const json = await res.json();
+  const result = json?.chart?.result?.[0];
+  if (!result) {
+    const errMsg = json?.chart?.error?.description ?? "データなし";
+    throw new Error(`Yahoo Finance: ${ticker} のデータが見つかりません — ${errMsg}`);
+  }
+
+  const timestamps = result.timestamp ?? [];
+  const quote = result.indicators?.quote?.[0] ?? {};
+  const adjClose = result.indicators?.adjclose?.[0]?.adjclose ?? [];
+
   const rows = [];
-  for (const line of lines) {
-    const [date, o, h, l, c, v] = line.split(",");
-    if (!date || o === "N/D") continue;
-    rows.push({ date, o: Number(o), h: Number(h), l: Number(l), c: Number(c), v: Number(v) || 0 });
+  for (let i = 0; i < timestamps.length; i++) {
+    const c = adjClose[i] ?? quote.close?.[i];
+    if (c == null || isNaN(c)) continue;
+    const date = new Date(timestamps[i] * 1000).toISOString().slice(0, 10);
+    rows.push({
+      date,
+      o: quote.open?.[i]  ?? c,
+      h: quote.high?.[i]  ?? c,
+      l: quote.low?.[i]   ?? c,
+      c,
+      v: quote.volume?.[i] ?? 0,
+    });
   }
   return rows.sort((a, b) => (a.date < b.date ? -1 : 1));
 }
+
