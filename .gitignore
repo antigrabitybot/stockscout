@@ -3,3 +3,9 @@ dist/
 logic.mjs
 .state/
 *.log
+store/
+# portfolio.json は個人情報を含む場合がある。
+# バッチ通知と連携させる場合は git 管理するか、GitHub Secrets で渡す方法を選ぶこと。
+# portfolio.json
+
+.vercel

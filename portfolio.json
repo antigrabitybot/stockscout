@@ -1,0 +1,25 @@
+[
+  {
+    "_comment": "以下はサンプルです。実際の保有銘柄に書き換えてください。",
+    "_usage": "このファイルを更新すると、日次バッチがDiscordに保有銘柄のシグナルを通知します。",
+    "code": "7203",
+    "market": "JP",
+    "costBasis": 2800,
+    "shares": 100,
+    "stId": "mom_12_1"
+  },
+  {
+    "code": "9984",
+    "market": "JP",
+    "costBasis": 7500,
+    "shares": 50,
+    "stId": "high_div"
+  },
+  {
+    "code": "AAPL",
+    "market": "US",
+    "costBasis": 180,
+    "shares": 10,
+    "stId": "mom_12_1"
+  }
+]

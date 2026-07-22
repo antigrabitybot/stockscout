@@ -1,0 +1,40 @@
+name: StockScout Backfill (one-time)
+
+# 初回だけ手動で実行する。
+# これにより Google Drive に price-store.json.gz が作られ、
+# 以降の日次更新(daily.yml)が差分追記モードで動作するようになる。
+#
+# 実行方法: Actions タブ → "StockScout Backfill (one-time)" → "Run workflow"
+# 所要時間: 約40〜50分(全銘柄5年分)
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 共有ロジックを StockScout.jsx から自動抽出
+        run: node scripts/extract-logic.mjs
+
+      - name: バックフィル実行(全銘柄5年分 → Google Drive に保存)
+        env:
+          JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: node batch/backfill.mjs
+
+      - name: 完了メッセージ
+        run: |
+          echo "✅ バックフィル完了"
+          echo "Google Drive に price-store.json.gz が作成されました。"
+          echo "次のステップ: Actions → StockScout Daily Update → Run workflow"

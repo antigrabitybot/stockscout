@@ -29,6 +29,8 @@ jobs:
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           GAS_US_STOCK_PROXY_URL: ${{ secrets.GAS_US_STOCK_PROXY_URL }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: node batch/build-snapshot.mjs
 
       - uses: actions/setup-python@v5
