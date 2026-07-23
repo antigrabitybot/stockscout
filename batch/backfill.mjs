@@ -106,7 +106,7 @@ async function getGdriveAccessToken() {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({
     iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/drive.file",
+    scope: "https://www.googleapis.com/auth/drive",
     aud: "https://oauth2.googleapis.com/token",
     iat: now,
     exp: now + 3600,
@@ -131,10 +131,27 @@ async function getGdriveAccessToken() {
 /** Google Drive からファイルを検索 → 取得。存在しなければ {} を返す */
 async function gdriveLoad() {
   const { folderId } = getGdriveConfig();
+  // フォルダIDの先頭6文字だけログに出す(全体は秘匿)
+  console.log(`  フォルダID(先頭6文字): ${folderId.slice(0, 6)}... (全${folderId.length}文字)`);
   const token = await getGdriveAccessToken();
+  console.log("  OAuth2トークン取得: OK");
+
+  // まずフォルダ自体が見えるか確認
+  const folderRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${folderId}?fields=id,name&supportsAllDrives=true`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  if (!folderRes.ok) {
+    const body = await folderRes.text();
+    throw new Error(`フォルダへのアクセス失敗(HTTP ${folderRes.status}): ${body}\n` +
+      "→ Google Drive フォルダがサービスアカウントの client_email に '編集者' で共有されているか確認してください。");
+  }
+  const folderInfo = await folderRes.json();
+  console.log(`  フォルダ確認OK: "${folderInfo.name}"`);
+
   const q = encodeURIComponent(`'${folderId}' in parents and name='${STORE_FILE}' and trashed=false`);
   const listRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`,
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!listRes.ok) throw new Error(`Drive list error: ${await listRes.text()}`);
@@ -146,7 +163,7 @@ async function gdriveLoad() {
   const fileId = files[0].id;
   console.log(`  既存ストアを取得: fileId=${fileId}`);
   const dlRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!dlRes.ok) throw new Error(`Drive download error: ${await dlRes.text()}`);
@@ -163,7 +180,7 @@ async function gdriveSave(gzBuffer) {
   // 既存ファイルを検索
   const q = encodeURIComponent(`'${folderId}' in parents and name='${STORE_FILE}' and trashed=false`);
   const listRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`,
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
   const { files } = await listRes.json();
