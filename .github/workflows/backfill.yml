@@ -21,7 +21,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: 共有ロジックを StockScout.jsx から自動抽出
         run: node scripts/extract-logic.mjs
