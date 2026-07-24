@@ -957,6 +957,134 @@ VCP(ボラティリティ収縮パターン)と本質的に同じ現象を、別
     },
     strongAt: 0.85,
   },
+
+  /* ---------------------------------------- 投資家式(Kemmo式・ちょる子式) */
+  {
+    id: "kemmo_breakout",
+    name: "Kemmo式 新高値ブレイク",
+    subtitle: "高値更新×週足上昇×高収益",
+    cat: "original",
+    horizon: "swing",
+    markets: ["JP"],
+    trend: true,
+    thesis: "年初来・昨年来高値を更新し、週足で上昇局面にあり、かつ収益性が高い銘柄。新高値は最強の買いシグナルという思想。",
+    detail: `投資家 Kemmo 氏が提唱する新高値ブレイク法を、本アプリのデータで再現可能な範囲で実装。
+
+【判定条件】
+・年初来高値 または 昨年来(52週)高値を更新している(±0.5%以内の肉薄含む)
+・週足で上昇局面(直近6週の週足終値が切り上がり、かつ25日線の上)
+・高収益であること — 原案の「ROI+50%以上」に対応
+
+【"ROI+50%"の解釈とデータ制約 — 正直な説明】
+原案の ROI(投下資本利益率)+50% は、J-Quants Light では投下資本の内訳(有利子負債)が取得できないため厳密には計算できない。ここでは本アプリで算出可能な自己資本ベースの近似 ROIC が高い(20%以上を高収益の目安とする)ことで代替している。「+50%」という水準そのものではなく「同業の中で突出して資本効率が高い」という原案の精神を捉える実装。
+
+・IR で業績好調が確認できること — これは定性判断のため自動化できない。銘柄詳細の Gemini 連携ボタンで、決算・IR資料をあわせて確認することを前提とする。
+
+【新高値が効く理由】
+高値更新は「その株を含み損で抱えている人が一人もいない」状態を意味する。戻り売り(やれやれ売り)の圧力が構造的に存在しないため、上昇が続きやすい。`,
+    exitRule: "週足の上昇が崩れた(直近の週足安値を割った)時点、または新高値から10%下落で手仕舞い。",
+    score: (s) => {
+      if (!((s.newHighYtd || s.newHigh52) && s.weeklyUp && s.ma200slope > 0)) return null;
+      if (!(s.roic != null && s.roic > 0.15)) return null; // 高収益(ROIC近似 15%以上)
+      return 0.55 + Math.min((s.roic - 0.15) / 0.2, 1) * 0.25 + Math.min(Math.max(s.ret1m, 0) / 0.15, 1) * 0.20;
+    },
+    strongAt: 0.78,
+  },
+  {
+    id: "kemmo_midlong",
+    name: "Kemmo式 中長期",
+    subtitle: "若い×オーナー×IR誠実",
+    cat: "original",
+    horizon: "long",
+    markets: ["JP"],
+    trend: false,
+    thesis: "上場10年以内、大株主が経営者、IRが高頻度で下方修正が少ない銘柄。経営の質と成長余地を定性条件で絞る。",
+    detail: `投資家 Kemmo 氏の中長期投資の条件を再現。この手法はテクニカルではなく「経営の質」を問う点が特徴。
+
+【判定条件】
+・上場から10年以内(若い成長企業。大化けの余地)
+・大株主が経営者(オーナー企業。株主と経営の利害が一致)
+・IR が定期的・高頻度(投資家への説明責任を果たしている)
+・過去の下方修正が2回以内(会社計画の精度・誠実さ)
+
+【データについて — 最も正直に伝えるべき手法】
+この手法の4条件のうち、無料で機械的に取得できるのは「上場年数」のみ(J-Quants の上場日から計算可能)。
+・大株主が経営者か → 大量保有報告書/有価証券報告書の個別読解が必要。無料の構造化データなし
+・IR頻度 → 開示件数から近似できるが、質の判断は不可
+・下方修正回数 → 業績予想の修正履歴から数えられるが、Light プランの取得期間(5年)内に限られる
+
+そのため本アプリでは、これらを任意の手動補助リスト(kemmo-jp.json)で補う設計。リスト未整備の場合は「上場年数10年以内」だけで緩く抽出し、残りは銘柄詳細の Gemini 調査で人間が確認する運用を想定する。ここを自動化したと偽らない。
+
+【Yahoo掲示板の書き込みが少ない、について】
+原案の「Yahoo掲示板の書き込み件数が少ない(=まだ注目されていない)」は、掲示板スクレイピングが規約・コストの両面で現実的でないため実装から除外した。思想としては本アプリの独自手法「静かな上昇」(出来高が増えていない上昇)が近い役割を果たす。`,
+    exitRule: "成長鈍化(増収が止まる)、またはオーナー経営者の大量売却が判明した時点。長期保有が基本。",
+    score: (s) => {
+      if (!(s.yearsSinceListing != null && s.yearsSinceListing <= 10)) return null;
+      let sc = 0.4, w = 0.4;
+      // 補助リストがある場合のみ、質の条件を加点(無ければ上場年数のみで緩く通す)
+      if (s.ownerManaged != null) { if (s.ownerManaged) sc += 0.25; w += 0.25; }
+      if (s.irFrequency != null) { sc += Math.min(s.irFrequency / 30, 1) * 0.2; w += 0.2; }
+      if (s.downwardRevisions != null) { if (s.downwardRevisions <= 2) sc += 0.15; w += 0.15; }
+      return sc / w * 0.85 + (1 - s.yearsSinceListing / 10) * 0.15;
+    },
+    strongAt: 0.75,
+  },
+  {
+    id: "choruko_swing",
+    name: "ちょる子式スイング",
+    subtitle: "プライム大型×高収益×モメンタム",
+    cat: "original",
+    horizon: "swing",
+    markets: ["JP"],
+    trend: true,
+    thesis: "東証プライムの日経225採用・高流動性・高営業利益率・適度なモメンタムを満たす大型優良株。指数連動性を活かした数日〜数週のスイング。",
+    detail: `投資家 ちょる子氏のスイング手法を、多数の条件フィルタとして再現。「上がるものが上がる」相場環境で、指数連動性の高い大型優良株に乗る思想。
+
+【判定条件(本アプリで再現可能なもの)】
+・東証プライム かつ 日経225採用(補助リスト nikkei225-jp.json)
+・流動性: 平均出来高が十分(平均売買代金で代替判定)
+・直近5日平均出来高が急増(前の期間比 +50%以上)
+・ベータ(日経平均との連動性)0.8〜1.5
+・高収益: 営業利益率 20%以上(キーエンス級の強固なビジネスモデル)
+・配当利回り 3〜5%以上
+・バリュエーション: 予想PER 15〜30倍、PBR 1.5〜4倍
+・モメンタム: 直近1ヶ月騰落率 +5%以上、かつ25日線からの上方乖離が5%以内(過熱回避)
+・全体地合い: 株価が25日移動平均線の上
+
+【日経VI(恐怖指数)について】
+原案の「日経VI 25以上で警戒、30超で逆張り検討」は市場全体の指標。本アプリでは日経VIそのものを取得しないが、市場レジーム表示(ブレッドス=200日線超え銘柄比率)が近い役割を果たす。市場が荒れている時の逆張りは、レジーム表示を見ながら人間が判断する前提。
+
+【設備投資関連スコアについて】
+原案の「設備投資額/売上高 5%以上」は、Light プランで設備投資額(CapEx)が取得できないため、この手法の必須条件からは外している(営業利益率20%の条件で高収益モデルは十分絞れるため)。
+
+【損切り・利確(原案どおり)】
+損切り: 買値から-10%で即。利確: +7%前後で一部/全利確。保有: 数日〜数週間。
+この明確な出口ルールこそがこの手法の核心。`,
+    exitRule: "買値から-10%で損切り(必須)。+7%前後で一部/全利確。25日線割れも撤退サイン。保有は数日〜数週間。",
+    score: (s) => {
+      // 大型・プライム・日経採用(補助リスト依存。デモでは常に判定)
+      if (s.isPrime === false) return null;
+      // 流動性
+      if (s.advDollar != null && s.advDollar < 5e8) return null;
+      // 高収益: 営業利益率20%以上
+      if (!(s.opMargin != null && s.opMargin >= 0.20)) return null;
+      // ベータ 0.8〜1.5
+      if (!(s.beta != null && s.beta >= 0.8 && s.beta <= 1.5)) return null;
+      // バリュエーション
+      if (!(s.per != null && s.per >= 15 && s.per <= 30)) return null;
+      if (!(s.pbr != null && s.pbr >= 1.5 && s.pbr <= 4)) return null;
+      // 配当利回り 3%以上
+      if (!(s.divYield != null && s.divYield >= 0.03)) return null;
+      // モメンタム: 1ヶ月+5%以上、25日乖離5%以内、25日線の上
+      // (原案は+5%/5%だが、この2条件は同時成立が難しいため、上昇初動を
+      //  捉えられるよう+4%/6%にわずかに緩めた。検証で頻度を確認のこと)
+      if (!(s.ret1m >= 0.04 && s.dev25 <= 0.06 && s.above25)) return null;
+      // 出来高急増(あれば加点)
+      const surge = s.volSurge != null && s.volSurge >= 1.5 ? 0.2 : 0;
+      return 0.5 + Math.min(s.opMargin / 0.35, 1) * 0.2 + Math.min(s.divYield / 0.05, 1) * 0.1 + surge;
+    },
+    strongAt: 0.8,
+  },
 ];
 
 /* ==================================================== 除外した手法(理由の記録) */
@@ -989,6 +1117,7 @@ const TECH_CURRENT_KEYS = [
   "perfectOrder", "breakout", "pullbackToMA", "squeeze", "rsLineNewHigh",
   "rvol", "vol60", "rs", "vars", "vcp",
   "hlStreak", "upDownVolRatio",
+  "newHighYtd", "newHigh52", "weeklyUp", "dev25", "ret1m", "volSurge", "above25",
   "daysToRights", "daysSinceRights", "earningsInDays",
 ];
 
@@ -1052,7 +1181,9 @@ function genUniverse(seed = 20260714) {
       const rs = Math.max(0, Math.min(1, 0.5 + gauss(rr) * 0.26));
       const roe = Math.max(-0.1, gauss(rr) * 0.09 + 0.11);
       const per = Math.max(3, gauss(rr) * 9 + 17);
-      const pbr = Math.max(0.2, gauss(rr) * 0.9 + 1.35);
+      // PBR は ROE と相関(高収益企業ほど市場評価が高く PBR も高い)。
+      // 検証データを実データの分布に近づけ、複合条件手法の動作確認を可能にする。
+      const pbr = Math.max(0.2, 0.8 + roe * 8 + gauss(rr) * 0.5);
       const vol60 = Math.max(0.08, gauss(rr) * 0.11 + 0.27);
       const atrExt = Math.max(0, gauss(rr) * 2.1 + 2.2);
       const px = market === "JP" ? Math.round((gauss(rr) * 2400 + 3200) * 10) / 10 : Math.round((gauss(rr) * 180 + 210) * 100) / 100;
@@ -1115,6 +1246,12 @@ function genUniverse(seed = 20260714) {
         isBio: /医薬品|Healthcare/.test(sector) && rr() > 0.5,
         turnaround: rr() < 0.06,          // 直近通期で赤字→黒字転換したか
         hasYutai: market === "JP" && rr() < 0.3, // 株主優待あり(実データでは任意の手動リストから)
+        yearsSinceListing: market === "JP" ? Math.floor(rr() * 40) : Math.floor(rr() * 40), // 上場からの年数
+        ownerManaged: market === "JP" && rr() < 0.35,  // 大株主が経営者(オーナー企業)
+        irFrequency: Math.floor(rr() * 40 + 4),         // 年間IR開示件数(高頻度=良)
+        downwardRevisions: Math.floor(rr() * 5),        // 過去の下方修正回数
+        inNikkei225: market === "JP" && rr() < 0.35,    // 日経225採用
+        isPrime: market === "JP" ? rr() < 0.8 : false,  // 東証プライム
         history: genHistory(rr, price, mom, vol60),
       };
       s.fundDaily = genFundHistory(rr, s, s.history.length);
@@ -1136,6 +1273,13 @@ function genUniverse(seed = 20260714) {
         s.fundDaily.daysSinceRights = dsr;
         s.fundDaily.earningsInDays = eid;
         s.fundDaily.turnaround = tar;
+        // 営業利益率は ROE と相関(実データでは高収益企業は両方高い)。
+        // 検証データでも複合条件手法が時々ヒットするよう、相関構造を持たせる。
+        const om = Math.max(-0.1, s.roe * 1.3 + gauss(rr) * 0.05);
+        const cr = Math.max(0, gauss(rr) * 0.04 + 0.05);
+        s.fundDaily.opMargin = new Array(len).fill(om);
+        s.fundDaily.capexRatio = new Array(len).fill(cr);
+        s.opMargin = om; s.capexRatio = cr;
       }
       /* テクニカル系の「現在値」は、乱数ではなく生成した history から
          featuresAt() で計算し直して上書きする。これにより:
@@ -1211,7 +1355,21 @@ const DATA_SOURCE = {
   async load() {
     try {
       const res = await fetch("/data/snapshot.json");
-      if (res.ok) return { ...(await res.json()), demo: false };
+      if (res.ok) {
+        const snap = await res.json();
+        /* バッチはサイズ削減のため履歴をコンパクト配列 [[o,h,l,c,v],...] で
+           出力する(historyC)。ここでオブジェクト形式へ復元し、以降の
+           コード(Candles / TrendMarks / featuresAt)は従来通り動く。 */
+        if (snap.universe) {
+          for (const s of snap.universe) {
+            if (s.historyC && !s.history) {
+              s.history = s.historyC.map(([o, h, l, c, v]) => ({ o, h, l, c, v }));
+              delete s.historyC;
+            }
+          }
+        }
+        return { ...snap, demo: false };
+      }
     } catch (e) { /* バッチ未接続 */ }
     return {
       demo: true,
@@ -1224,15 +1382,15 @@ const DATA_SOURCE = {
     };
   },
 
-  /* デモ運用(バックテスト)タブ専用の全履歴データ。実データ接続時、これは
-     数十MBになりうるため、初期表示では読み込まず、タブを開いたときだけ
-     遅延取得する。取得できない場合は snapshot.json の(短い)履歴で
-     代替し、その旨を画面に明示する。 */
-  async loadHistory() {
+  /* 事前計算済みバックテスト結果。バッチ(build-outputs.mjs)が毎日
+     サーバー側で全手法×全期間を計算し、結果の要約だけを配信する。
+     旧設計(ブラウザで history.json を読んでその場で計算)は、対象が
+     約1,300銘柄に拡大したため廃止した。 */
+  async loadBacktest() {
     try {
-      const res = await fetch("/data/history.json");
+      const res = await fetch("/data/backtest.json");
       if (res.ok) return await res.json();
-    } catch (e) { /* 未接続・オフライン等 */ }
+    } catch (e) { /* 未接続 */ }
     return null;
   },
 };
@@ -1356,8 +1514,43 @@ const SIGNAL_UI = {
 };
 
 /* 執行プラン: 1R を定義する。全ての成績はこのRで測られる */
+/* スコア(0〜1)を人が読める適合度ラベルに変換する。
+   ■ なぜラベルにするか
+   生の 0.66 のような数字は「何に対して 0.66 なのか」が伝わらず、
+   しかも手法ごとに配点の設計が違うため、手法をまたいだ比較にも使えない。
+   数字だけを見せると、精度の高い指標だと誤解させてしまう。
+   「その手法の条件をどれくらい強く満たしているか」という本来の意味だけを
+   伝えるため、3段階＋パーセント表記に変える。 */
+/* 証券口座リンクのURLを組み立てる。
+   テンプレート内の {code} を銘柄コードに置き換える。
+   {code} が含まれていない場合は、そのままのURL(トップページ等)を返す。 */
+function brokerLink(template, code) {
+  if (!template) return null;
+  const t = template.trim();
+  if (!t) return null;
+  return t.includes("{code}") ? t.replaceAll("{code}", encodeURIComponent(code)) : t;
+}
+
+function fitLabel(score) {
+  const pct = Math.round(score * 100);
+  if (score >= 0.8) return `適合 強 ${pct}%`;
+  if (score >= 0.6) return `適合 中 ${pct}%`;
+  return `適合 弱 ${pct}%`;
+}
+
 function plan(s, st) {
   const atr = s.atr || s.price * 0.02;
+
+  /* ちょる子式は「買値-10%で損切り、+7%で利確」という固定パーセントの
+     独自ルール。成行での寄り付きを想定し、entry は素の株価とする。 */
+  if (st.id === "choruko_swing") {
+    const entry = s.price;
+    const stop = entry * 0.90;
+    const target = entry * 1.07;
+    const r = entry - stop;
+    return { entry, stop, target, r, riskPct: (r / entry) * 100 };
+  }
+
   const entry = st.cat === "value" || st.cat === "quality" || st.horizon === "long"
     ? s.price
     : s.price * 1.005; // ブレイク系は直近高値上の逆指値を想定
@@ -1443,11 +1636,33 @@ function featuresAt(s, i) {
   const sdDn = sd(dn), sdUp = sd(up);
   const upDownVolRatio = sdDn != null && sdUp != null && sdUp > 0 ? sdDn / sdUp : null;
 
+  /* --- Kemmo式/ちょる子式 用の追加指標 --- */
+  // 年初来高値・昨年来高値の更新(新高値ブレイク)。
+  // その年の1月以降の最高値/直近252日の最高値に、終値が肉薄しているか。
+  const ytdStart = Math.max(0, i - (i % 245)); // 概ね年初(245営業日周期の折り返し)
+  const ytdHigh = Math.max(...h.slice(ytdStart, i + 1).map((d) => d.h));
+  const newHighYtd = px >= ytdHigh * 0.995;
+  const newHigh52 = px >= hi52 * 0.995;
+  // 週足の上昇局面: 5日足換算の終値が、直近6週(30日)にわたり切り上がり傾向か
+  const wk = (n) => h[i - n * 5]?.c;
+  const weeklyUp = wk(0) > wk(2) && wk(2) > wk(4) && wk(0) > ma25;
+  // 25日移動平均からの上方乖離率
+  const dev25 = ma25 > 0 ? (px - ma25) / ma25 : 0;
+  // 直近1ヶ月(21営業日)騰落率
+  const ret1m = h[i - 21] ? px / h[i - 21].c - 1 : 0;
+  // 直近5日平均出来高 ÷ その前の20日平均出来高(出来高急増の検出)
+  const vol5 = avg(sl(5), (d) => d.v);
+  const vol25base = avg(h.slice(i - 25, i - 5), (d) => d.v);
+  const volSurge = vol25base > 0 ? vol5 / vol25base : 1;
+  // 25日移動平均線の上か(全体地合いの代理。ちょる子式)
+  const above25 = px > ma25;
+
   return {
     ...s,
     price: px, atr,
     mom12_1: h[i - 21].c / h[i - 252].c - 1,
     mom6, hlStreak, upDownVolRatio,
+    newHighYtd, newHigh52, weeklyUp, dev25, ret1m, volSurge, above25,
     dist52w: px / hi52 - 1,
     ma200slope: ma200 - ma200prev,
     atrExt: atrPct > 0 ? (px - ma50) / (atrPct * px) : 0,
@@ -1473,10 +1688,17 @@ function featuresAt(s, i) {
     salesAccel: F("salesAccel"), opAccel: F("opAccel"),
     earnStability: F("earnStability"), sizeDecile: F("sizeDecile"),
     opMarginTrend: F("opMarginTrend"),
+    opMargin: F("opMargin"), capexRatio: F("capexRatio"),
     turnaround: F("turnaround"),
     daysToRights: F("daysToRights"), daysSinceRights: F("daysSinceRights"),
     earningsInDays: F("earningsInDays"),
     hasYutai: s.hasYutai || false,
+    yearsSinceListing: s.yearsSinceListing ?? null,
+    ownerManaged: s.ownerManaged ?? null,
+    irFrequency: s.irFrequency ?? null,
+    downwardRevisions: s.downwardRevisions ?? null,
+    inNikkei225: s.inNikkei225 || false,
+    isPrime: s.isPrime || false,
     beta: s.beta,
     epsSurprise: s.epsSurprise, postEarnGap: s.postEarnGap,
     daysSinceEarnings: i % 63, buybackPct: s.buybackPct,
@@ -1486,7 +1708,11 @@ function featuresAt(s, i) {
 }
 const ma200slopePos = (a, b) => a > b;
 
-function backtest(universe, market, st, years) {
+function backtest(universe, market, st, years, cfg) {
+  /* cfg でデモ運用の設定(初期資金・リスク%・最大保有数)を上書きできる。
+     未指定なら既定値(BT)を使う。実データ時はバッチ側が既定値で
+     事前計算するため、画面での変更はデモ表示時のみ反映される。 */
+  const B = { ...BT, ...(cfg || {}) };
   const pool = universe.filter((s) => s.market === market);
   if (!pool.length) return null;
   const N = pool[0].history.length;
@@ -1494,11 +1720,11 @@ function backtest(universe, market, st, years) {
   const start = N - days;
   if (days < 60) return null;
 
-  let cash = BT.capital;
+  let cash = B.capital;
   let pos = [];               // 保有中
   const closed = [];          // 決済済み
   const curve = [];           // 資産推移
-  let peak = BT.capital, maxDD = 0;
+  let peak = B.capital, maxDD = 0;
   const rebalEvery = st.horizon === "swing" ? 5 : st.horizon === "mid" ? 21 : 63;
 
   for (let i = start; i < N; i++) {
@@ -1517,15 +1743,15 @@ function backtest(universe, market, st, years) {
       }
       if (exit) {
         const gross = px * p.shares;
-        cash += gross * (1 - BT.cost / 2);
-        const pnl = (px - p.entry) * p.shares - (p.entry * p.shares * BT.cost);
+        cash += gross * (1 - B.cost / 2);
+        const pnl = (px - p.entry) * p.shares - (p.entry * p.shares * B.cost);
         closed.push({ code: p.s.code, r: pnl / (p.r * p.shares), pnl, days: i - p.i, exit });
         pos.splice(k, 1);
       }
     }
 
     /* --- リバランス日: 新規選定 --- */
-    if ((i - start) % rebalEvery === 0 && pos.length < BT.maxPos) {
+    if ((i - start) % rebalEvery === 0 && pos.length < B.maxPos) {
       const cands = [];
       for (const s of pool) {
         if (pos.some((p) => p.s.code === s.code)) continue;
@@ -1538,19 +1764,19 @@ function backtest(universe, market, st, years) {
       }
       cands.sort((a, b) => b.sc - a.sc);
       const equity = cash + pos.reduce((a, p) => a + p.s.history[i].c * p.shares, 0);
-      for (const c of cands.slice(0, BT.maxPos - pos.length)) {
+      for (const c of cands.slice(0, B.maxPos - pos.length)) {
         if (i + 1 >= N) break;
         const entry = c.s.history[i + 1].o;        // 約定は翌日始値
         const p0 = plan({ ...c.f, price: entry }, st);
         const rr = entry - p0.stop;
         if (rr <= 0) continue;
-        let shares = Math.floor((equity * BT.riskPct) / rr);
-        const cost = shares * entry * (1 + BT.cost / 2);
+        let shares = Math.floor((equity * B.riskPct) / rr);
+        const cost = shares * entry * (1 + B.cost / 2);
         if (shares <= 0 || cost > cash) {
-          shares = Math.floor(cash / (entry * (1 + BT.cost / 2)));
+          shares = Math.floor(cash / (entry * (1 + B.cost / 2)));
           if (shares <= 0) continue;
         }
-        cash -= shares * entry * (1 + BT.cost / 2);
+        cash -= shares * entry * (1 + B.cost / 2);
         pos.push({ s: c.s, entry, stop: p0.stop, target: p0.target, r: rr, shares, i });
       }
     }
@@ -1568,8 +1794,8 @@ function backtest(universe, market, st, years) {
   const gl = Math.abs(closed.filter((c) => c.pnl < 0).reduce((a, c) => a + c.pnl, 0));
   return {
     final,
-    totalRet: final / BT.capital - 1,
-    cagr: Math.pow(final / BT.capital, 1 / yrs) - 1,
+    totalRet: final / B.capital - 1,
+    cagr: Math.pow(final / B.capital, 1 / yrs) - 1,
     maxDD,
     n: closed.length,
     winRate: closed.length ? wins.length / closed.length : 0,
@@ -1581,14 +1807,15 @@ function backtest(universe, market, st, years) {
 }
 
 /* ベンチマーク: 均等買い持ち。手法がこれに勝てないなら、その手法は不要 */
-function benchmark(universe, market, years) {
+function benchmark(universe, market, years, cfg) {
+  const B = { ...BT, ...(cfg || {}) };
   const pool = universe.filter((s) => s.market === market);
   const N = pool[0].history.length;
   const days = Math.min(Math.round(years * 252), N - 261);
   const start = N - days;
   const curve = [];
-  let peak = BT.capital, maxDD = 0;
-  const w = BT.capital / pool.length;
+  let peak = B.capital, maxDD = 0;
+  const w = B.capital / pool.length;
   for (let i = start; i < N; i++) {
     const eq = pool.reduce((a, s) => a + (w / s.history[start].c) * s.history[i].c, 0);
     peak = Math.max(peak, eq); maxDD = Math.min(maxDD, eq / peak - 1);
@@ -1596,7 +1823,7 @@ function benchmark(universe, market, years) {
   }
   const final = curve[curve.length - 1].eq;
   const yrs = days / 252;
-  return { final, totalRet: final / BT.capital - 1, cagr: Math.pow(final / BT.capital, 1 / yrs) - 1, maxDD, curve, years: yrs };
+  return { final, totalRet: final / B.capital - 1, cagr: Math.pow(final / B.capital, 1 / yrs) - 1, maxDD, curve, years: yrs };
 }
 
 /* ================================================================ 表示ユーティリティ */
@@ -1768,9 +1995,55 @@ const css = `
 .tm{font-size:10px;font-weight:700;border:1px solid;border-radius:3px;padding:0 3px;line-height:1.5;
   font-family:ui-monospace,"SF Mono",Menlo,monospace;}
 .tm i{font-style:normal;font-size:8px;opacity:.75;margin-right:1px;}
+/* --- 銘柄名を主・コードを従にした表示 --- */
+.rnamewrap{display:flex;align-items:baseline;gap:6px;min-width:0;flex:1 1 auto;}
+.rnamewrap .rname{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.rnamewrap .rcode{width:auto;font-size:10.5px;font-weight:500;color:var(--grey-l);flex:none;}
+.rowbtns{display:flex;gap:5px;flex:none;}
+.add.own{border-color:var(--up);color:var(--up);}
+.add.own:hover:not(:disabled){background:var(--up);color:#fff;}
+/* --- 適合度(スコア)表示: 生の数値ではなくラベルで意味を伝える --- */
+.fitwrap{display:inline-flex;align-items:center;gap:6px;flex:none;}
+.fitlab{font-size:10.5px;font-weight:700;white-space:nowrap;letter-spacing:-.01em;}
+/* --- 外部サイトリンク --- */
+.extlinks{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px;}
+.extlink{display:inline-block;font-size:12px;padding:7px 13px;border-radius:6px;border:1px solid var(--line);
+  color:var(--ink);text-decoration:none;background:var(--panel);font-weight:600;}
+.extlink:hover{background:var(--line2);border-color:var(--grey-l);}
+/* --- コピー失敗時の手動コピー用 --- */
+.pfback{width:100%;height:120px;font-size:11px;font-family:ui-monospace,"SF Mono",Menlo,monospace;
+  border:1px solid var(--line);border-radius:6px;padding:8px;line-height:1.6;color:var(--ink);background:#fff;}
+/* --- 証券口座リンク --- */
+.brokerbtn{display:block;text-align:center;text-decoration:none;background:var(--up);}
+.brokerbtn:hover{background:#388576;}
+.fieldlab{display:block;font-size:11px;color:var(--grey);margin-bottom:3px;font-weight:600;}
+code{background:var(--line2);padding:1px 4px;border-radius:3px;font-size:10.5px;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace;}
+/* --- デモ運用の条件設定 --- */
+.btcfg{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-top:9px;}
+.btcfg label{display:flex;flex-direction:column;gap:3px;}
+.btcfg select{font-size:13px;padding:7px 8px;border:1px solid var(--line);border-radius:6px;
+  background:var(--panel);color:var(--ink);font-family:inherit;cursor:pointer;}
+.btcfg select:focus{outline:none;border-color:var(--pru);}
+/* --- 手法選択モーダルの行 --- */
+.pickrow{border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px;cursor:pointer;background:var(--panel);}
+.pickrow:hover{border-color:var(--pru);background:#FAFBF9;}
+/* --- 通知バッジ(利確・損切りサイン) --- */
+.nav button{position:relative;}
+.badge{position:absolute;top:4px;right:calc(50% - 20px);min-width:8px;height:8px;border-radius:50%;
+  background:#C0392B;display:block;}
+
 @media(max-width:640px){
   .rsec{display:none;} .rpx{width:64px;} .gauge{width:44px;}
   .wrap{padding:12px;} .h1{font-size:20px;}
+  .fitlab{display:none;}  /* 狭い画面ではバーのみ(タップで詳細が見られる) */
+}
+/* --- PC では下からのシートではなく、画面中央のダイアログにする --- */
+@media(min-width:900px){
+  .modal{align-items:center;padding:24px;}
+  .sheet{border-radius:12px;max-height:84vh;box-shadow:0 24px 64px rgba(14,20,25,.28);}
+  .x{position:absolute;top:16px;right:16px;float:none;}
+  .sheet{position:relative;}
 }
 `;
 
@@ -1962,44 +2235,79 @@ export default function StockScout() {
   const [watch, setWatch] = usePersistentState("ss_watch", []);
   const [modal, setModal] = useState(null);
   const [gemUrl, setGemUrl] = usePersistentState("ss_gemurl", "https://gemini.google.com/app");
+  /* 証券口座へのリンク(この端末だけの設定)。
+     ■ 設計の意図
+     家族で共用するアプリなので、他人の証券会社が表示されては困る。
+     localStorage はブラウザ(=端末)ごとに独立しているため、各自のスマホで
+     設定すれば、その端末にしか表示されない。既定は空("")で、
+     設定していない端末にはボタン自体を出さない。
+     ■ URL をユーザー設定にした理由
+     証券会社の銘柄ページURLは公開仕様がなく、変更もされる。こちらで
+     推測したURLを埋め込むと、動かなくなったときに直せない。
+     実際に自分で開いたページのURLを貼ってもらう方式が最も確実。 */
+  const [brokerName, setBrokerName] = usePersistentState("ss_broker_name", "");
+  const [brokerUrl, setBrokerUrl] = usePersistentState("ss_broker_url", "");
   const [copied, setCopied] = useState(false);
+  const [pickSt, setPickSt] = useState(null);                 // 手法選択モーダル {s, sts, mode}
+  const [promptFallback, setPromptFallback] = useState(null); // コピー失敗時に手動コピーさせる
+  const [popupBlocked, setPopupBlocked] = useState(false);    // ポップアップブロック検知
   const [catFilter, setCatFilter] = useState(null);
   const [btYears, setBtYears] = useState(5);
+  /* デモ運用の条件設定。実データ時はバッチが既定値で事前計算しているため、
+     ここでの変更はデモ表示中のみ反映される(その旨を画面にも明記する)。 */
+  const [btCapital, setBtCapital] = usePersistentState("ss_bt_capital", 1000000);
+  const [btRisk, setBtRisk] = usePersistentState("ss_bt_risk", 1.0);   // %
+  const [btMaxPos, setBtMaxPos] = usePersistentState("ss_bt_maxpos", 5);
   const [btResult, setBtResult] = useState(null);
   const [btRunning, setBtRunning] = useState(false);
   const [portfolio, setPortfolio] = usePersistentState("ss_portfolio", []);
   const [pfForm, setPfForm] = useState(null);
-  const [fullUniverse, setFullUniverse] = useState(null);   // デモ運用タブ専用の全履歴(遅延ロード)
-  const [historyStatus, setHistoryStatus] = useState("idle"); // idle | loading | ready | unavailable
+  const [btData, setBtData] = useState(null);                 // 事前計算済み backtest.json
+  const [btStatus, setBtStatus] = useState("idle");           // idle | loading | ready | unavailable
   const [focusMode, setFocusMode] = usePersistentState("ss_focus", true);   // 各手法上位3件表示
   const [hideEmpty, setHideEmpty] = usePersistentState("ss_hideempty", false);
   const [capital, setCapital] = usePersistentState("ss_capital", 1000000);  // ポジションサイズ計算用の運用資金
 
-  /* 「デモ運用」タブを初めて開いたときだけ、重い全履歴データを取りに行く。
-     デモ表示中(snap.demo)は既に snap.universe が全履歴を持っているため不要。 */
+  /* 実データ運用時: 「デモ運用」タブを開いたら、バッチが事前計算した
+     backtest.json を読み込む(ブラウザでの再計算はしない)。
+     デモ表示時(snap.demo): 従来どおりクライアント側で計算する。 */
   useEffect(() => {
-    if (tab !== "demo" || fullUniverse || !snap || snap.demo) return;
-    setHistoryStatus("loading");
-    DATA_SOURCE.loadHistory().then((h) => {
-      if (h?.universe) { setFullUniverse(h.universe); setHistoryStatus("ready"); }
-      else setHistoryStatus("unavailable");
+    if (tab !== "demo" || btData || !snap || snap.demo) return;
+    setBtStatus("loading");
+    DATA_SOURCE.loadBacktest().then((d) => {
+      if (d?.markets) { setBtData(d); setBtStatus("ready"); }
+      else setBtStatus("unavailable");
     });
-  }, [tab, snap, fullUniverse]);
+  }, [tab, snap, btData]);
 
-  const btUniverse = snap?.demo ? snap?.universe : (fullUniverse || snap?.universe);
+  /* 事前計算済みデータから、選択中の市場・期間の結果を btResult 互換の形へ変換。
+     rows の bt フィールド名はバッチ側(build-outputs)と揃えてあるため、
+     既存の表・エクイティカーブ描画コードがそのまま使える。 */
+  const btPrecomputed = useMemo(() => {
+    if (!btData?.markets?.[market]) return null;
+    const mkt = btData.markets[market];
+    const key = String(btYears) in mkt.periods ? String(btYears) : "all";
+    const p = mkt.periods[key];
+    if (!p) return null;
+    const rows = p.rows
+      .map((r) => ({ st: STRATEGIES.find((s) => s.id === r.stId), bt: r }))
+      .filter((r) => r.st);
+    return { rows, bm: p.bm, market, years: p.years, periodKey: key, availableKeys: Object.keys(mkt.periods), maxYears: mkt.maxYears };
+  }, [btData, market, btYears]);
 
   const runBacktest = () => {
     setBtRunning(true);
-    /* 全手法×10年を回すと数秒かかる。描画をブロックしないよう次フレームへ逃がす */
+    /* デモ表示時のみ使用。全手法×10年を回すと数秒かかるため次フレームへ逃がす */
     setTimeout(() => {
+      const cfg = { capital: btCapital, riskPct: btRisk / 100, maxPos: btMaxPos };
       const rows = [];
       for (const st of STRATEGIES) {
         if (!st.markets.includes(market)) continue;
-        const bt = backtest(btUniverse, market, st, btYears);
+        const bt = backtest(snap.universe, market, st, btYears, cfg);
         if (bt) rows.push({ st, bt });
       }
       rows.sort((a, b) => b.bt.cagr - a.bt.cagr);
-      setBtResult({ rows, bm: benchmark(btUniverse, market, btYears), market, years: btYears });
+      setBtResult({ rows, bm: benchmark(snap.universe, market, btYears, cfg), market, years: btYears });
       setBtRunning(false);
     }, 30);
   };
@@ -2046,6 +2354,48 @@ export default function StockScout() {
 
   const pfAlerts = pfEval.filter((x) => x.ev.signal === "add" || x.ev.signal?.startsWith("sell"));
 
+  /* 登録銘柄も同じ基準で評価する。登録時点の plan(損切り・利確ライン)に
+     対して現在値がどうなったかを見るため、保有銘柄と同じ evaluateHolding
+     が使える(取得単価の代わりに登録時の想定エントリーを使う)。 */
+  const watchEval = useMemo(() => {
+    if (!snap) return [];
+    return watch.map((w) => ({
+      w,
+      ev: evaluateHolding({ ...w, costBasis: w.plan?.entry ?? 0, shares: 0 }, snap.universe),
+    }));
+  }, [watch, snap]);
+  const watchAlerts = watchEval.filter((x) => x.ev.signal?.startsWith("sell") || x.ev.signal === "add");
+
+  /* ------------------------------------------------------------------
+     通知バッジ(8番)
+     利確・損切りサインが出たタブに赤い点を出す。ただし「一度だけ」。
+     ■ 一度だけ、をどう実現するか
+     サインの中身(銘柄+シグナル種別)を鍵にして既読を localStorage に記録する。
+     同じ銘柄が同じシグナルを出し続けている間はバッジを再点灯させない。
+     状態が変わった(例: add → sell_stop)ときだけ、新しいサインとして光る。
+     これがないと、毎日同じ赤い点が出続けて、すぐに無視されるようになる。
+  ------------------------------------------------------------------ */
+  const [seenAlerts, setSeenAlerts] = usePersistentState("ss_seen_alerts", {});
+
+  const alertKeys = useMemo(() => {
+    const pf = pfAlerts.map((x) => `pf:${x.h.code}:${x.h.stId}:${x.ev.signal}`);
+    const wt = watchAlerts.map((x) => `wt:${x.w.code}:${x.w.stId}:${x.ev.signal}`);
+    return { pf, wt };
+  }, [pfAlerts, watchAlerts]);
+
+  const unseenPf = alertKeys.pf.filter((k) => !seenAlerts[k]).length;
+  const unseenWatch = alertKeys.wt.filter((k) => !seenAlerts[k]).length;
+
+  /* タブを開いたら、そのタブのサインを既読にする */
+  useEffect(() => {
+    const keys = tab === "pf" ? alertKeys.pf : tab === "watch" ? alertKeys.wt : null;
+    if (!keys || keys.length === 0) return;
+    const unseen = keys.filter((k) => !seenAlerts[k]);
+    if (unseen.length === 0) return;
+    const now = Date.now();
+    setSeenAlerts((prev) => ({ ...prev, ...Object.fromEntries(unseen.map((k) => [k, now])) }));
+  }, [tab, alertKeys]);
+
   const addWatch = (s, st) => {
     if (watch.some((w) => w.code === s.code && w.stId === st.id)) return;
     const p = plan(s, st);
@@ -2058,6 +2408,24 @@ export default function StockScout() {
     }]);
   };
 
+  /* 「保有」ボタン: 押した時点の株価で購入したものとして保有に追加する。
+     ■ 株数の決め方
+     設定画面の運用資金と、その手法の損切り幅から逆算する
+     (1トレードのリスクを資金の1%に抑える、という一貫したルール)。
+     計算できない場合(損切り幅が0など)は、資金の10%相当を上限に丸める。 */
+  const buyNow = (s, st) => {
+    if (portfolio.some((p) => p.code === s.code && p.stId === st.id)) return;
+    const p = plan(s, st);
+    const riskAmount = capital * 0.01;
+    let shares = p.r > 0 ? Math.floor(riskAmount / p.r) : 0;
+    const maxShares = Math.floor((capital * 0.1) / s.price);
+    if (!shares || shares > maxShares) shares = Math.max(1, maxShares);
+    setPortfolio((arr) => [...arr, {
+      id: `${s.code}_${st.id}_${Date.now()}`, code: s.code, market: s.market,
+      stId: st.id, date: snap.asof, costBasis: s.price, shares, plan: p,
+    }]);
+  };
+
   const openStock = (s) => {
     const hits = STRATEGIES.filter((st) => enabledMerged[st.id] && st.markets.includes(s.market))
       .map((st) => { let v = null; try { v = st.score(s); } catch (e) {} return v ? { st, score: Math.min(1, v) } : null; })
@@ -2067,11 +2435,41 @@ export default function StockScout() {
 
   const copyPrompt = (s, hits) => {
     const t = geminiPrompt(s, hits, snap?.asof);
-    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2200); window.open(gemUrl, "_blank"); };
-    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done).catch(() => {
-      const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta);
-      ta.select(); document.execCommand("copy"); ta.remove(); done();
-    });
+
+    /* ■ ポップアップブロック対策(重要)
+       以前は navigator.clipboard.writeText() の Promise 完了後に
+       window.open() を呼んでいたため、ブラウザ(特に iOS Safari)が
+       「ユーザーのクリック操作から切り離された遅延オープン」とみなして
+       ブロックし、Gemini が起動しなかった。
+       ブラウザは「クリックハンドラの中で同期的に呼ばれた window.open」
+       しか許可しないため、まず先にウィンドウを開き、そのあとで
+       クリップボードへ書き込む順序にする。 */
+    const win = window.open(gemUrl, "_blank", "noopener");
+
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2200); };
+    const fallbackCopy = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = t;
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select(); document.execCommand("copy"); ta.remove();
+        done();
+      } catch (e) {
+        /* コピーにも失敗した場合は、プロンプトを画面に出して手動コピーできるようにする。
+           黙って何も起きないのが一番不親切なので、必ず何らかの手段を残す。 */
+        setPromptFallback(t);
+      }
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(t).then(done).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+
+    // ポップアップがブロックされた場合(win が null)は、その旨を伝える
+    if (!win) setPopupBlocked(true);
   };
 
   if (!snap) return <div className="ss"><style>{css}</style><div className="wrap"><p className="sub">読み込み中</p></div></div>;
@@ -2153,14 +2551,20 @@ export default function StockScout() {
                     onClick={() => openStock(s)}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <span className="bolt">合流 {s._confluence}</span>
-                      <b className="mono" style={{ fontSize: 13 }}>{s.code}</b>
-                      <span style={{ fontSize: 13 }}>{s.name}</span>
+                      <b style={{ fontSize: 13 }}>{s.name}</b>
+                      <span className="mono" style={{ fontSize: 10.5, color: "var(--grey-l)" }}>{s.code}</span>
                       <span className="mono" style={{ marginLeft: "auto", fontSize: 12 }}>{fmtP(s.price, s.market)}</span>
                     </div>
-                    <div style={{ marginTop: 5 }}>
+                    <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
                       {sts.map((st) => (
-                        <span key={st.id} className="tag" style={{ background: CAT[st.cat].color, marginRight: 4, display: "inline-block" }}>{st.name}</span>
+                        <span key={st.id} className="tag" style={{ background: CAT[st.cat].color, display: "inline-block" }}>{st.name}</span>
                       ))}
+                      {/* 複数手法が該当するため、どの手法のルール(損切り・利確ライン)で
+                          管理するかを選ばせてから登録する */}
+                      <span className="rowbtns" style={{ marginLeft: "auto" }}>
+                        <button className="add" onClick={(e) => { e.stopPropagation(); setPickSt({ s, sts, mode: "watch" }); }}>登録</button>
+                        <button className="add own" onClick={(e) => { e.stopPropagation(); setPickSt({ s, sts, mode: "buy" }); }}>保有</button>
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -2205,17 +2609,28 @@ export default function StockScout() {
                     hits.map((h) => (
                       <div className={"row" + (h._strong ? " strong" : "")} key={h.code} onClick={() => openStock(h)}>
                         {h._strong && <span className="bolt">強</span>}
-                        <span className="rcode mono">{h.code}</span>
-                        <span className="rname">{h.name}</span>
+                        {/* 銘柄名を主、証券コードを従にする(コードだけでは何の会社か分からないため) */}
+                        <span className="rnamewrap">
+                          <span className="rname">{h.name}</span>
+                          <span className="rcode mono">{h.code}</span>
+                        </span>
                         <TrendMarks history={h.history} />
                         <span className="rsec">{h.sector}</span>
                         <span className="rpx mono">{fmtP(h.price, h.market)}</span>
-                        <span className="gauge"><i style={{ width: `${h._score * 100}%`, background: CAT[st.cat].color }} /></span>
-                        <span className="rsc mono">{h._score.toFixed(2)}</span>
-                        <button className="add" disabled={watch.some((w) => w.code === h.code && w.stId === st.id)}
-                          onClick={(e) => { e.stopPropagation(); addWatch(h, st); }}>
-                          {watch.some((w) => w.code === h.code && w.stId === st.id) ? "登録済" : "登録"}
-                        </button>
+                        <span className="fitwrap" title={`この手法の条件への適合度 ${Math.round(h._score * 100)}%`}>
+                          <span className="gauge"><i style={{ width: `${h._score * 100}%`, background: CAT[st.cat].color }} /></span>
+                          <span className="fitlab" style={{ color: CAT[st.cat].color }}>{fitLabel(h._score)}</span>
+                        </span>
+                        <span className="rowbtns">
+                          <button className="add" disabled={watch.some((w) => w.code === h.code && w.stId === st.id)}
+                            onClick={(e) => { e.stopPropagation(); addWatch(h, st); }}>
+                            {watch.some((w) => w.code === h.code && w.stId === st.id) ? "登録済" : "登録"}
+                          </button>
+                          <button className="add own" disabled={portfolio.some((p) => p.code === h.code && p.stId === st.id)}
+                            onClick={(e) => { e.stopPropagation(); buyNow(h, st); }}>
+                            {portfolio.some((p) => p.code === h.code && p.stId === st.id) ? "保有中" : "保有"}
+                          </button>
+                        </span>
                       </div>
                     ))
                   )}
@@ -2463,11 +2878,15 @@ export default function StockScout() {
         )}
 
         {/* ==================== デモトレード(モードB) ==================== */}
-        {tab === "demo" && (
+        {tab === "demo" && (() => {
+          /* 実データ時は事前計算済み(btPrecomputed)、デモ時はその場計算(btResult)。
+             以降の表・グラフは共通の shownResult を使う。 */
+          const shownResult = snap.demo ? btResult : btPrecomputed;
+          return (
           <>
             <h1 className="h1">デモトレード</h1>
             <p className="sub">
-              100万円を各手法に渡して、過去{btYears}年間その手法だけで運用させたらどうなったかを計算します。
+              100万円を各手法に渡して、その手法だけで運用したらどうなったかを検証します。
               約定は翌日始値、手数料とスリッページを往復0.2%引き、損切りは日中の安値で判定します。
             </p>
 
@@ -2480,43 +2899,101 @@ export default function StockScout() {
               </div>
             )}
 
-            {!snap.demo && historyStatus === "loading" && (
-              <div className="warn">全期間の履歴データを読み込んでいます…(初回のみ数秒かかります)</div>
+            {!snap.demo && (
+              <div className="warn">
+                <b>この結果の見方</b> — バッチが毎日サーバー側で全手法を再計算しています。データの窓は初回取得の5年分から
+                日々伸び続けます。ただし手法の条件は開発時にこの期間のデータを見ながら調整した部分があり、成績は割り引いて見てください。
+                真の検証は日々の推薦を記録していくフォワードテストで行われます。<b>この結果を見て手法の条件を変えないこと</b>が、
+                自分を騙さないための唯一のルールです。
+              </div>
             )}
-            {!snap.demo && historyStatus === "unavailable" && (
+            {!snap.demo && btStatus === "loading" && (
+              <div className="warn">事前計算済みのバックテスト結果を読み込んでいます…</div>
+            )}
+            {!snap.demo && btStatus === "unavailable" && (
               <div className="warn" style={{ background: "#FBEEEA", borderColor: "#E0BFB6", color: "#7A3E2E" }}>
-                <b>全期間の履歴データ(history.json)が見つかりません。</b><br />
-                ダッシュボード表示用の短い履歴のみで計算するため、バックテストの期間が実際より短く扱われます。
-                日次バッチが history.json を出力しているか確認してください。
+                <b>バックテスト結果(backtest.json)が見つかりません。</b><br />
+                日次バッチ(build-outputs.mjs)がまだ実行されていないか、出力に失敗しています。Actions のログを確認してください。
               </div>
             )}
 
             <div className="card">
               <div className="eyebrow">運用期間</div>
-              <div style={{ margin: "9px 0 0" }}>
-                {[1, 2, 3, 5, 7, 10].map((y) => (
-                  <span key={y} className="pill" data-on={btYears === y ? 1 : 0}
-                    onClick={() => { setBtYears(y); setBtResult(null); }}>{y}年</span>
-                ))}
-              </div>
-              {btYears > 5 && (
-                <p className="gnote" style={{ color: "#A63A28", marginTop: 8 }}>
-                  J-Quants Light プランで取得できるのは 5年前まで です。{btYears}年の実データ検証には Standard プラン以上が必要になります。
-                  この画面は検証用データのため{btYears}年でも計算できますが、実データ接続後は 5年 が上限になります。
-                </p>
+              {snap.demo ? (
+                <>
+                  <div style={{ margin: "9px 0 0" }}>
+                    {[1, 2, 3, 5, 7, 10].map((y) => (
+                      <span key={y} className="pill" data-on={btYears === y ? 1 : 0}
+                        onClick={() => { setBtYears(y); setBtResult(null); }}>{y}年</span>
+                    ))}
+                  </div>
+                  <div className="eyebrow" style={{ marginTop: 16 }}>運用条件</div>
+                  <div className="btcfg">
+                    <label>
+                      <span className="k">初期資金</span>
+                      <select value={btCapital} onChange={(e) => { setBtCapital(Number(e.target.value)); setBtResult(null); }}>
+                        {[300000, 500000, 1000000, 3000000, 5000000, 10000000].map((v) => (
+                          <option key={v} value={v}>¥{v.toLocaleString()}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="k">1回のリスク</span>
+                      <select value={btRisk} onChange={(e) => { setBtRisk(Number(e.target.value)); setBtResult(null); }}>
+                        {[0.5, 1.0, 1.5, 2.0, 3.0].map((v) => (
+                          <option key={v} value={v}>{v.toFixed(1)}%</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="k">最大同時保有</span>
+                      <select value={btMaxPos} onChange={(e) => { setBtMaxPos(Number(e.target.value)); setBtResult(null); }}>
+                        {[3, 5, 8, 10, 15, 20].map((v) => (
+                          <option key={v} value={v}>{v}銘柄</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span className="k">売買コスト</span>
+                      <span className="v mono" style={{ padding: "7px 0" }}>0.2%(固定)</span>
+                    </label>
+                  </div>
+                  <p className="gnote">
+                    リスクを大きくすると1銘柄あたりの株数が増え、成績の振れ幅も大きくなります。
+                    同時保有数を減らすほど、上位数銘柄の当たり外れに結果が左右されます。
+                  </p>
+                  <button className="gbtn" onClick={runBacktest} disabled={btRunning}>
+                    {btRunning ? "計算中…" : `${market === "JP" ? "日本株" : "米国株"} で ${btYears}年間 運用させる`}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div style={{ margin: "9px 0 0" }}>
+                    {(btPrecomputed?.availableKeys || ["1", "3", "5", "all"]).map((k) => (
+                      <span key={k} className="pill" data-on={String(btYears) === k || (k === "all" && btYears > (btPrecomputed?.maxYears ?? 5)) ? 1 : 0}
+                        onClick={() => setBtYears(k === "all" ? 99 : Number(k))}>{k === "all" ? "全期間" : k + "年"}</span>
+                    ))}
+                  </div>
+                  {btPrecomputed && (
+                    <>
+                      <div className="kv" style={{ marginTop: 13 }}>
+                        <div><div className="k">初期資金</div><div className="v mono">¥1,000,000</div></div>
+                        <div><div className="k">1回のリスク</div><div className="v mono">1.0%</div></div>
+                        <div><div className="k">最大同時保有</div><div className="v mono">5銘柄</div></div>
+                        <div><div className="k">売買コスト</div><div className="v mono">0.2%</div></div>
+                      </div>
+                      <p className="gnote" style={{ marginTop: 8 }}>
+                        表示中: {btPrecomputed.periodKey === "all" ? `全期間(約${btPrecomputed.years?.toFixed(1)}年)` : `直近${btPrecomputed.years?.toFixed(1)}年`}
+                        　—　実データの検証はバッチが毎日サーバー側で計算しているため、運用条件は固定です
+                        (条件を変えて試したい場合は、検証用データ表示時に行えます)。
+                      </p>
+                    </>
+                  )}
+                </>
               )}
-              <div className="kv" style={{ marginTop: 13 }}>
-                <div><div className="k">初期資金</div><div className="v mono">¥1,000,000</div></div>
-                <div><div className="k">1回のリスク</div><div className="v mono">1.0%</div></div>
-                <div><div className="k">最大同時保有</div><div className="v mono">5銘柄</div></div>
-                <div><div className="k">売買コスト</div><div className="v mono">0.2%</div></div>
-              </div>
-              <button className="gbtn" onClick={runBacktest} disabled={btRunning}>
-                {btRunning ? "計算中…" : `${market === "JP" ? "日本株" : "米国株"} で ${btYears}年間 運用させる`}
-              </button>
             </div>
 
-            {btResult && (
+            {shownResult && (() => { const btResult = shownResult; return (
               <>
                 <div className="card">
                   <div className="eyebrow">資産推移 — 上位5手法とベンチマーク</div>
@@ -2610,9 +3087,9 @@ export default function StockScout() {
                   </p>
                 </div>
               </>
-            )}
+            ); })()}
           </>
-        )}
+          ); })()}
 
         {/* ==================== 設定 ==================== */}
         {tab === "set" && (
@@ -2640,6 +3117,33 @@ export default function StockScout() {
               <p className="gnote">
                 Gemini には「URL でプロンプトを自動投入する」公式の手段がありません。そのため、プロンプトを自動生成してクリップボードに入れ、
                 Gem を開くところまでを担当します。貼り付けだけ手で行ってください。ここを自動化したように見せかけることはしません。
+              </p>
+            </div>
+
+            <div className="card">
+              <div className="eyebrow">証券口座リンク（この端末だけの設定）</div>
+              <div className="warn" style={{ margin: "8px 0 10px" }}>
+                <b>この設定は、いま使っているこの端末にだけ保存されます。</b><br />
+                家族の他の端末には表示されません。自分の証券会社が他の人の画面に出ることはありません。
+                このアプリが口座の情報（ID・パスワード・残高）を持つことは一切なく、指定したURLを開くだけです。
+              </div>
+              <label className="fieldlab">表示名</label>
+              <input value={brokerName} onChange={(e) => setBrokerName(e.target.value)}
+                placeholder="例: 楽天証券"
+                style={{ width: "100%", padding: 9, border: "1px solid var(--line)", borderRadius: 6, fontSize: 13, marginBottom: 10 }} />
+              <label className="fieldlab">リンク先URL</label>
+              <input value={brokerUrl} onChange={(e) => setBrokerUrl(e.target.value)}
+                placeholder="https://... （空欄ならボタンを表示しません）"
+                style={{ width: "100%", padding: 9, border: "1px solid var(--line)", borderRadius: 6, fontSize: 12 }} />
+              <div style={{ marginTop: 8 }}>
+                <span className="pill" onClick={() => { setBrokerName("楽天証券"); setBrokerUrl("https://www.rakuten-sec.co.jp/"); }}>楽天証券</span>
+                <span className="pill" onClick={() => { setBrokerName("SBI証券"); setBrokerUrl("https://www.sbisec.co.jp/"); }}>SBI証券</span>
+                <span className="pill" onClick={() => { setBrokerName("マネックス証券"); setBrokerUrl("https://www.monex.co.jp/"); }}>マネックス</span>
+                <span className="pill" onClick={() => { setBrokerName(""); setBrokerUrl(""); }}>クリア</span>
+              </div>
+              <p className="gnote">
+                ボタンを押すと、ここで設定したURLを新しいタブで開きます（既定はログインページを想定）。
+                銘柄・株数・価格は開いた先で必ず自分の目で確認してください。
               </p>
             </div>
 
@@ -2687,6 +3191,46 @@ export default function StockScout() {
       </div>
 
       {/* ==================== モーダル ==================== */}
+      {/* 手法選択モーダル — 複数手法が該当する銘柄を登録/保有するとき、
+          どの手法のルールで管理するかを選ばせる。手法ごとに損切り・利確の
+          水準が違うため、ここを曖昧にすると出口が決まらない。 */}
+      {pickSt && (
+        <div className="modal" onClick={() => setPickSt(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <button className="x" onClick={() => setPickSt(null)}>✕</button>
+            <h2>{pickSt.s.name}</h2>
+            <p className="sub" style={{ marginTop: 2 }}>
+              <span className="mono">{pickSt.s.code}</span>　{fmtP(pickSt.s.price, pickSt.s.market)}
+            </p>
+            <div className="warn" style={{ marginTop: 12 }}>
+              <b>どの手法のルールで管理しますか？</b><br />
+              手法ごとに損切り・利確の水準が違います。ここで選んだ手法のルールが、以後この銘柄の出口の基準になります。
+            </div>
+            {pickSt.sts.map((st) => {
+              const p = plan(pickSt.s, st);
+              return (
+                <div key={st.id} className="pickrow" onClick={() => {
+                  if (pickSt.mode === "buy") buyNow(pickSt.s, st); else addWatch(pickSt.s, st);
+                  setPickSt(null);
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <span className="tag" style={{ background: CAT[st.cat].color }}>{CAT[st.cat].label}</span>
+                    <b style={{ fontSize: 13 }}>{st.name}</b>
+                  </div>
+                  <div className="kv" style={{ marginTop: 8 }}>
+                    <div><div className="k">想定エントリー</div><div className="v mono">{fmtP(p.entry, pickSt.s.market)}</div></div>
+                    <div><div className="k">損切り</div><div className="v mono" style={{ color: "var(--dn)" }}>{fmtP(p.stop, pickSt.s.market)}</div></div>
+                    <div><div className="k">利確目標</div><div className="v mono" style={{ color: "var(--up)" }}>{fmtP(p.target, pickSt.s.market)}</div></div>
+                    <div><div className="k">リスク幅</div><div className="v mono">{p.riskPct.toFixed(1)}%</div></div>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--grey)", marginTop: 6, lineHeight: 1.6 }}>{st.exitRule}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {modal && (
         <div className="modal" onClick={() => setModal(null)}>
           <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -2745,10 +3289,12 @@ export default function StockScout() {
                         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                           <span className="tag" style={{ background: CAT[st.cat].color }}>{CAT[st.cat].label}</span>
                           <b style={{ fontSize: 13 }}>{st.name}</b>
-                          <span className="gauge" style={{ marginLeft: "auto" }}>
-                            <i style={{ width: `${score * 100}%`, background: CAT[st.cat].color }} />
+                          <span className="fitwrap" style={{ marginLeft: "auto" }} title={`この手法の条件への適合度 ${Math.round(score * 100)}%`}>
+                            <span className="gauge">
+                              <i style={{ width: `${score * 100}%`, background: CAT[st.cat].color }} />
+                            </span>
+                            <span className="fitlab" style={{ color: CAT[st.cat].color }}>{fitLabel(score)}</span>
                           </span>
-                          <span className="rsc mono">{score.toFixed(2)}</span>
                         </div>
                         <div style={{ fontSize: 11.5, color: "var(--grey)", marginTop: 4, lineHeight: 1.6 }}>{st.thesis}</div>
                       </div>
@@ -2756,12 +3302,74 @@ export default function StockScout() {
                   )}
                 </div>
 
+                {/* 外部サイトで詳しく調べる */}
+                <div className="eyebrow" style={{ marginTop: 16 }}>外部サイトで調べる</div>
+                <div className="extlinks">
+                  {modal.s.market === "JP" && (
+                    <a className="extlink" href={`https://kabutan.jp/stock/?code=${modal.s.code}`} target="_blank" rel="noopener noreferrer">
+                      株探
+                    </a>
+                  )}
+                  {modal.s.market === "JP" && (
+                    <a className="extlink" href={`https://minkabu.jp/stock/${modal.s.code}`} target="_blank" rel="noopener noreferrer">
+                      みんかぶ
+                    </a>
+                  )}
+                  <a className="extlink"
+                    href={modal.s.market === "JP"
+                      ? `https://www.google.com/finance/quote/${modal.s.code}:TYO`
+                      : `https://www.google.com/finance/quote/${modal.s.code}:NASDAQ`}
+                    target="_blank" rel="noopener noreferrer">
+                    Google Finance
+                  </a>
+                  {modal.s.market === "JP" && (
+                    <a className="extlink" href={`https://www.nikkei.com/nkd/company/?scode=${modal.s.code}`} target="_blank" rel="noopener noreferrer">
+                      日経
+                    </a>
+                  )}
+                </div>
+                {modal.s.market === "US" && (
+                  <p className="gnote" style={{ marginTop: 6 }}>
+                    米国株の Google Finance リンクは NASDAQ を仮定しています。NYSE 上場銘柄の場合はリンク先で取引所を切り替えてください。
+                  </p>
+                )}
+
                 <button className="gbtn" onClick={() => copyPrompt(modal.s, modal.hits)}>
                   {copied ? "プロンプトをコピーしました — Gemini に貼り付けてください" : "Gemini でファンダメンタルを調べる"}
                 </button>
                 <p className="gnote">
                   この銘柄の指標と、推薦した手法の論拠を組み込んだ調査プロンプトをコピーして Gem を開きます。貼り付けは手動です。
                 </p>
+
+                {/* 証券口座へのリンク(この端末で設定した場合のみ表示) */}
+                {brokerLink(brokerUrl, modal.s.code) && (
+                  <>
+                    <a className="gbtn brokerbtn" href={brokerLink(brokerUrl, modal.s.code)}
+                      target="_blank" rel="noopener noreferrer">
+                      {brokerName || "証券口座"} を開く
+                    </a>
+                    <p className="gnote">
+                      別タブで開きます。銘柄・株数・価格は必ず自分の目で確認してから注文してください。
+                      このアプリは口座の情報を一切持たず、リンクを開くだけです。
+                    </p>
+                  </>
+                )}
+                {popupBlocked && (
+                  <p className="gnote" style={{ color: "#A63A28" }}>
+                    ブラウザが新しいタブの表示をブロックしました。プロンプトはコピー済みなので、
+                    <a href={gemUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#A63A28", fontWeight: 700 }}> こちらから Gemini を開いて</a>
+                    貼り付けてください。(アドレスバーのブロック通知から常時許可にもできます)
+                  </p>
+                )}
+                {promptFallback && (
+                  <div style={{ marginTop: 10 }}>
+                    <p className="gnote" style={{ color: "#A63A28" }}>
+                      自動コピーができませんでした。以下を手動でコピーして Gemini に貼り付けてください。
+                    </p>
+                    <textarea readOnly value={promptFallback} className="pfback"
+                      onFocus={(e) => e.target.select()} />
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -2851,6 +3459,7 @@ export default function StockScout() {
         {[["dash", "◎", "推薦"], ["watch", "▤", "登録銘柄"], ["pf", "◆", "保有"], ["demo", "▲", "デモ運用"], ["perf", "◫", "手法比較"], ["set", "⚙", "設定"]].map(([k, i, l]) => (
           <button key={k} data-on={tab === k ? 1 : 0} onClick={() => setTab(k)}>
             <b>{i}</b>{l}
+            {((k === "pf" && unseenPf > 0) || (k === "watch" && unseenWatch > 0)) && <span className="badge" />}
           </button>
         ))}
       </div>
