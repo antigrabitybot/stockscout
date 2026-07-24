@@ -18,12 +18,21 @@ import json
 import os
 import sys
 import urllib.request
+import urllib.error
 from datetime import date
 from pathlib import Path
 
-WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
+WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 SNAP = Path("public/data/snapshot.json")
 STATE = Path(".state/notified.json")
+
+# Discord(Cloudflare)は、Python urllib のデフォルト User-Agent
+# ("Python-urllib/3.x")を弾いて 403 Forbidden を返すことがある。
+# ブラウザ的な User-Agent を明示することで回避する。
+COMMON_HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (compatible; StockScoutBot/1.0; +https://github.com/)",
+}
 
 CAT_COLOR = {
     "flagship": 0x111820, "momentum": 0xB4531F, "value": 0x1B3A5C,
@@ -107,7 +116,7 @@ def notify_portfolio(snap, state):
     }
     req = urllib.request.Request(
         WEBHOOK, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=COMMON_HEADERS,
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -156,11 +165,19 @@ def main():
     req = urllib.request.Request(
         WEBHOOK,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=COMMON_HEADERS,
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             print(f"通知しました: {len(fresh)} 件 (HTTP {r.status})")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")[:300]
+        print(f"通知に失敗しました: HTTP {e.code} {e.reason} / {body}", file=sys.stderr)
+        if e.code == 403:
+            print("  → Webhook URL が無効化・削除されているか、コピー時に空白/改行が"
+                  "混入している可能性があります。Discord側でWebhookを再発行し、"
+                  "GitHub SecretsのDISCORD_WEBHOOK_URLを更新してください。", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"通知に失敗しました: {e}", file=sys.stderr)
         return 1
