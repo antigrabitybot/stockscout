@@ -1,8 +1,8 @@
 name: StockScout Backfill (one-time)
 
 # 初回だけ手動で実行する。
-# これにより Google Drive に price-store.json.gz が作られ、
-# 以降の日次更新(daily.yml)が差分追記モードで動作するようになる。
+# GitHub Releases に price-store.json.gz を保存する。
+# GITHUB_TOKEN は Actions が自動で提供するため、追加の Secrets 登録は不要。
 #
 # 実行方法: Actions タブ → "StockScout Backfill (one-time)" → "Run workflow"
 # 所要時間: 約40〜50分(全銘柄5年分)
@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: write   # GitHub Releases の作成・アセットアップロードに必要
 
 jobs:
   backfill:
@@ -26,15 +26,16 @@ jobs:
       - name: 共有ロジックを StockScout.jsx から自動抽出
         run: node scripts/extract-logic.mjs
 
-      - name: バックフィル実行(全銘柄5年分 → Google Drive に保存)
+      - name: バックフィル実行(全銘柄5年分 → GitHub Releases に保存)
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STORE_BACKEND: github
         run: node batch/backfill.mjs
 
       - name: 完了メッセージ
         run: |
           echo "✅ バックフィル完了"
-          echo "Google Drive に price-store.json.gz が作成されました。"
-          echo "次のステップ: Actions → StockScout Daily Update → Run workflow"
+          echo "GitHub Releases (タグ: price-store-data) に price-store.json.gz が作成されました。"
+          echo "次のステップ: Actions → StockScout Daily Batch → Run workflow"
