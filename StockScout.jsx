@@ -1528,11 +1528,29 @@ const SIGNAL_UI = {
 /* 証券口座リンクのURLを組み立てる。
    テンプレート内の {code} を銘柄コードに置き換える。
    {code} が含まれていない場合は、そのままのURL(トップページ等)を返す。 */
-function brokerLink(template, code) {
-  if (!template) return null;
-  const t = template.trim();
+/* 外部リンク用URLの安全性を検証する。
+   ■ なぜ必要か
+   証券口座リンク・Gemini URL はユーザーが自由に入力できる。ここに
+   javascript: で始まる文字列を入れると、リンクを押した瞬間に任意の
+   スクリプトが実行されてしまう(自己被害に限られるとはいえ、家族で
+   共有するアプリで、どこかからコピーしてきたURLを何気なく貼る場面は
+   十分ありうる)。http/https 以外は受け付けない。 */
+function safeUrl(u) {
+  if (!u) return null;
+  const t = String(u).trim();
   if (!t) return null;
-  return t.includes("{code}") ? t.replaceAll("{code}", encodeURIComponent(code)) : t;
+  try {
+    const parsed = new URL(t);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? t : null;
+  } catch (e) {
+    return null; // URLとして解釈できない文字列は使わない
+  }
+}
+
+function brokerLink(template, code) {
+  const safe = safeUrl(template);
+  if (!safe) return null;
+  return safe.includes("{code}") ? safe.replaceAll("{code}", encodeURIComponent(code)) : safe;
 }
 
 function fitLabel(score) {
@@ -1832,7 +1850,10 @@ function benchmark(universe, market, years, cfg) {
 
 /* ================================================================ 表示ユーティリティ */
 const fmtP = (v, m) => (m === "JP" ? "¥" + Math.round(v).toLocaleString() : "$" + v.toFixed(2));
-const pct = (v, d = 1) => (v * 100).toFixed(d) + "%";
+/* null/undefined を "0.0%" のように誤魔化さず、"データなし" と正直に表示する。
+   (v*100).toFixed() は null を 0 として計算してしまい、データが無いのに
+   「0%」という意味のある数値に見えてしまうため、明示的に弾く。 */
+const pct = (v, d = 1) => (v == null || !Number.isFinite(v) ? "データなし" : (v * 100).toFixed(d) + "%");
 
 /* Gemini 連携用プロンプト生成 */
 /* 数値が null/undefined でもクラッシュしない安全なフォーマッタ。
@@ -2061,6 +2082,12 @@ code{background:var(--line2);padding:1px 4px;border-radius:3px;font-size:10.5px;
   .rsec{display:none;} .rpx{width:64px;} .gauge{width:44px;}
   .wrap{padding:12px;} .h1{font-size:20px;}
   .fitlab{display:none;}  /* 狭い画面ではバーのみ(タップで詳細が見られる) */
+  /* リストは銘柄名(または米株ならティッカー)を主役にし、証券コードと
+     トレンドマークは詳細画面に譲る。狭い画面に情報を詰め込みすぎると
+     文字同士が近接して読みにくくなるため。 */
+  .rnamewrap .rcode{display:none;}
+  .rowmarks{display:none;}
+  .rnamewrap .rname{font-size:14px;}
 }
 /* --- PC では下からのシートではなく、画面中央のダイアログにする --- */
 @media(min-width:900px){
@@ -2482,7 +2509,9 @@ export default function StockScout() {
        ブラウザは「クリックハンドラの中で同期的に呼ばれた window.open」
        しか許可しないため、まず先にウィンドウを開き、そのあとで
        クリップボードへ書き込む順序にする。 */
-    const win = window.open(gemUrl, "_blank", "noopener");
+    /* 設定画面でユーザーが自由に入力できる値なので、安全性を検証してから開く。
+       不正な場合は既定の Gemini トップページにフォールバックする。 */
+    const win = window.open(safeUrl(gemUrl) || "https://gemini.google.com/app", "_blank", "noopener");
 
     const done = () => { setCopied(true); setTimeout(() => setCopied(false), 2200); };
     const fallbackCopy = () => {
@@ -2590,8 +2619,10 @@ export default function StockScout() {
                     onClick={() => openStock(s)}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                       <span className="bolt">合流 {s._confluence}</span>
-                      <b style={{ fontSize: 13 }}>{s.name}</b>
-                      <span className="mono" style={{ fontSize: 10.5, color: "var(--grey-l)" }}>{s.code}</span>
+                      <b style={{ fontSize: 13 }}>{s.market === "US" ? s.code : s.name}</b>
+                      {s.market === "JP" && (
+                        <span className="mono" style={{ fontSize: 10.5, color: "var(--grey-l)" }}>{s.code}</span>
+                      )}
                       <span className="mono" style={{ marginLeft: "auto", fontSize: 12 }}>{fmtP(s.price, s.market)}</span>
                     </div>
                     <div style={{ marginTop: 5, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
@@ -2648,12 +2679,18 @@ export default function StockScout() {
                     hits.map((h) => (
                       <div className={"row" + (h._strong ? " strong" : "")} key={h.code} onClick={() => openStock(h)}>
                         {h._strong && <span className="bolt">強</span>}
-                        {/* 銘柄名を主、証券コードを従にする(コードだけでは何の会社か分からないため) */}
+                        {/* 表示の優先順位:
+                            日本株 = 銘柄名を主、証券コードを従(コードだけでは何の会社か分からないため)
+                            米国株 = ティッカーが識別子として通用するため、ティッカーのみを表示。
+                                     正式社名は詳細画面でのみ表示する。
+                            モバイル幅では証券コードとトレンドマークをリストから外し、
+                            銘柄名(または米株ならティッカー)だけを大きく見せる。
+                            両方とも詳細画面(モーダル)を開けば証券コード・トレンドマークを確認できる。 */}
                         <span className="rnamewrap">
-                          <span className="rname">{h.name}</span>
-                          <span className="rcode mono">{h.code}</span>
+                          <span className="rname">{h.market === "US" ? h.code : h.name}</span>
+                          {h.market === "JP" && <span className="rcode mono">{h.code}</span>}
                         </span>
-                        <TrendMarks history={h.history} />
+                        <span className="rowmarks"><TrendMarks history={h.history} /></span>
                         <span className="rsec">{h.sector}</span>
                         <span className="rpx mono">{fmtP(h.price, h.market)}</span>
                         <span className="fitwrap" title={`この手法の条件への適合度 ${Math.round(h._score * 100)}%`}>
@@ -2711,7 +2748,7 @@ export default function StockScout() {
                   <div className="card" key={w.id}>
                     <div className="c-h">
                       <span className="c-code mono">{w.code}</span>
-                      <span className="c-name">{cs.name}</span>
+                      {cs.market === "JP" && <span className="c-name">{cs.name}</span>}
                       <span className="tag" style={{ background: CAT[st.cat].color }}>{st.name}</span>
                     </div>
                     <div className="eyebrow">{HORIZON[st.horizon]} ・ 登録 {w.date}</div>
@@ -2819,7 +2856,7 @@ export default function StockScout() {
                     <div className={"card" + (ev.signal !== "hold" ? " alert" : "")} key={h.id} style={ev.signal !== "hold" ? { borderColor: sig.color, boxShadow: `0 0 0 3px ${sig.bg}` } : {}}>
                       <div className="c-h">
                         <span className="c-code mono">{h.code}</span>
-                        <span className="c-name">{ev.s.name}</span>
+                        {ev.s.market === "JP" && <span className="c-name">{ev.s.name}</span>}
                         {ev.st ? <span className="tag" style={{ background: CAT[ev.st.cat].color }}>{ev.st.name}</span>
                           : <span className="tag" style={{ background: "#6B7580" }}>自己管理</span>}
                       </div>
@@ -3308,12 +3345,12 @@ export default function StockScout() {
                 <div style={{ fontSize: 21, fontWeight: 800, marginTop: 5 }} className="mono">{fmtP(modal.s.price, modal.s.market)}</div>
 
                 <div className="kv" style={{ marginTop: 15 }}>
-                  <div><div className="k">PER</div><div className="v mono">{modal.s.per.toFixed(1)}</div></div>
-                  <div><div className="k">PBR</div><div className="v mono">{modal.s.pbr.toFixed(2)}</div></div>
+                  <div><div className="k">PER</div><div className="v mono">{safeNum(modal.s.per, 1)}</div></div>
+                  <div><div className="k">PBR</div><div className="v mono">{safeNum(modal.s.pbr, 2)}</div></div>
                   <div><div className="k">ROE</div><div className="v mono">{pct(modal.s.roe)}</div></div>
                   <div><div className="k">FCF利回り</div><div className="v mono">{pct(modal.s.fcfYield)}</div></div>
                   <div><div className="k">配当利回り</div><div className="v mono">{pct(modal.s.divYield)}</div></div>
-                  <div><div className="k">Fスコア</div><div className="v mono">{modal.s.fscore}/9</div></div>
+                  <div><div className="k">Fスコア</div><div className="v mono">{modal.s.fscore != null ? modal.s.fscore + "/9" : "データなし"}</div></div>
                   <div><div className="k">12-1モメンタム</div><div className="v mono">{pct(modal.s.mom12_1)}</div></div>
                   <div><div className="k">52週高値差</div><div className="v mono">{pct(modal.s.dist52w)}</div></div>
                 </div>
@@ -3396,7 +3433,7 @@ export default function StockScout() {
                 {popupBlocked && (
                   <p className="gnote" style={{ color: "#A63A28" }}>
                     ブラウザが新しいタブの表示をブロックしました。プロンプトはコピー済みなので、
-                    <a href={gemUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#A63A28", fontWeight: 700 }}> こちらから Gemini を開いて</a>
+                    <a href={safeUrl(gemUrl) || "https://gemini.google.com/app"} target="_blank" rel="noopener noreferrer" style={{ color: "#A63A28", fontWeight: 700 }}> こちらから Gemini を開いて</a>
                     貼り付けてください。(アドレスバーのブロック通知から常時許可にもできます)
                   </p>
                 )}
