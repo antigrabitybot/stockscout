@@ -1206,13 +1206,17 @@ function genUniverse(seed = 20260714) {
         squeeze: rr() > 0.85,
         rsLineNewHigh: rr() > 0.85,
         per, pbr, roe,
-        roic: Math.max(-0.05, roe * (0.72 + rr() * 0.4)),
+        roic: rr() < 0.12 ? null : Math.max(-0.05, roe * (0.72 + rr() * 0.4)),
         wacc: 0.055 + rr() * 0.035,
         earnYield: per > 0 ? 1 / per : 0,
         fcfYield: Math.max(-0.05, gauss(rr) * 0.045 + 0.048),
-        evEbitda: Math.max(1.5, gauss(rr) * 4.5 + 9.5),
+        // 実データでは、赤字企業やデータ欠損でこれらが null になることがある。
+        // 検証データが常に数値で埋まっていると、null 未対応のバグ(実際に
+        // Gemini プロンプト生成で発生した)を開発中に検出できない。
+        // 約12%の確率で意図的に null にし、実運用に近い欠損状態を再現する。
+        evEbitda: rr() < 0.12 ? null : Math.max(1.5, gauss(rr) * 4.5 + 9.5),
         divYield: Math.max(0, gauss(rr) * 0.016 + 0.024),
-        payout: Math.max(0, Math.min(1.4, gauss(rr) * 0.22 + 0.36)),
+        payout: rr() < 0.12 ? null : Math.max(0, Math.min(1.4, gauss(rr) * 0.22 + 0.36)),
         netIncome: gauss(rr) > -1.6 ? 1 : -1,
         psr: Math.max(0.05, gauss(rr) * 0.8 + 1.2),
         opMarginTrend: gauss(rr) * 0.02,
@@ -1221,7 +1225,7 @@ function genUniverse(seed = 20260714) {
         roeYears: Math.max(0, Math.round(gauss(rr) * 1.8 + 2.2)),
         grossProf: Math.max(0.02, gauss(rr) * 0.14 + 0.29),
         accrual: gauss(rr) * 0.05 + 0.015,
-        altmanZ: Math.max(0.2, gauss(rr) * 1.5 + 3.0),
+        altmanZ: rr() < 0.12 ? null : Math.max(0.2, gauss(rr) * 1.5 + 3.0),
         epsGrowthQ: gauss(rr) * 0.42 + 0.13,
         epsGrowthY: gauss(rr) * 0.3 + 0.11,
         salesAccel: gauss(rr) * 0.07,
@@ -1831,8 +1835,26 @@ const fmtP = (v, m) => (m === "JP" ? "¥" + Math.round(v).toLocaleString() : "$"
 const pct = (v, d = 1) => (v * 100).toFixed(d) + "%";
 
 /* Gemini 連携用プロンプト生成 */
+/* 数値が null/undefined でもクラッシュしない安全なフォーマッタ。
+   ■ これが本当のバグだった
+   以前の実装は s.per.toFixed(1) のように無条件に .toFixed() を呼んでいた。
+   PER・EV/EBITDA・Altman Z 等は、赤字企業やデータ欠損時に null になりうる
+   (F() 関数が null を返す設計のため)。null に対して .toFixed() を呼ぶと
+   その場で例外が発生し、クリックハンドラの残り(window.open や
+   クリップボードコピー)が一切実行されなくなる。これが「Geminiボタンを
+   押しても何も起きない」の実際の原因だった。ポップアップブロック対策は
+   無駄ではないが、それ以前にこの例外で処理が止まっていた。 */
+function safeNum(v, digits, suffix = "") {
+  return v == null || !Number.isFinite(v) ? "データなし" : v.toFixed(digits) + suffix;
+}
+function safePct(v, digits = 1) {
+  return v == null || !Number.isFinite(v) ? "データなし" : (v * 100).toFixed(digits) + "%";
+}
+
 function geminiPrompt(s, hits, asof = "直近") {
-  const reasons = hits.map((h) => `・${h.st.name}（${CAT[h.st.cat].label}）: スコア ${h.score.toFixed(2)}／根拠: ${h.st.thesis}`).join("\n");
+  const reasons = hits.length
+    ? hits.map((h) => `・${h.st.name}（${CAT[h.st.cat].label}）: スコア ${h.score.toFixed(2)}／根拠: ${h.st.thesis}`).join("\n")
+    : "（この銘柄は現在どの手法にも該当していません。銘柄詳細画面から直接調査を開始しています。）";
   return `あなたは日米株のファンダメンタル分析を行うアナリストです。以下の銘柄について調査してください。
 
 【銘柄】${s.code} ${s.name}（${s.market === "JP" ? "日本株" : "米国株"} / ${s.sector}）
@@ -1841,20 +1863,22 @@ function geminiPrompt(s, hits, asof = "直近") {
 【この銘柄が機械的スクリーニングで抽出された理由】
 ${reasons}
 
-【主要指標（スクリーニング時点）】
-PER ${s.per.toFixed(1)}倍 / PBR ${s.pbr.toFixed(2)}倍 / ROE ${pct(s.roe)} / ROIC ${pct(s.roic)}
-FCF利回り ${pct(s.fcfYield)} / 配当利回り ${pct(s.divYield)} / 配当性向 ${pct(s.payout, 0)}
-EV/EBITDA ${s.evEbitda.toFixed(1)}倍 / Piotroski Fスコア ${s.fscore}/9 / Altman Z ${s.altmanZ.toFixed(1)}
-12-1ヶ月モメンタム ${pct(s.mom12_1)} / 52週高値からの乖離 ${pct(s.dist52w)}
+【主要指標（スクリーニング時点、「データなし」は取得できていない項目）】
+PER ${safeNum(s.per, 1, "倍")} / PBR ${safeNum(s.pbr, 2, "倍")} / ROE ${safePct(s.roe)} / ROIC ${safePct(s.roic)}
+FCF利回り ${safePct(s.fcfYield)} / 配当利回り ${safePct(s.divYield)} / 配当性向 ${safePct(s.payout, 0)}
+EV/EBITDA ${safeNum(s.evEbitda, 1, "倍")} / Piotroski Fスコア ${s.fscore != null ? s.fscore + "/9" : "データなし"} / Altman Z ${safeNum(s.altmanZ, 1)}
+12-1ヶ月モメンタム ${safePct(s.mom12_1)} / 52週高値からの乖離 ${safePct(s.dist52w)}
 
 【調査してほしいこと】
 1. 上記の定量シグナルは、事業の実態と整合しているか。数字だけが良く見えている「罠」ではないか。
-2. 直近の決算・IR資料・適時開示で、この数字の背景にある事業上の出来事は何か。
+2. 直近の決算・IR資料・適時開示で、この数字の背景にある事業上の出来事は何か。特に、株価の材料になりそうな
+   最近のニュース・SNS上の話題があれば、Web検索や X(旧Twitter)の情報も踏まえて教えてほしい。
 3. この投資仮説が崩れるとしたら、どのような形か。最も可能性の高い失敗シナリオを挙げよ。
 4. 同業他社と比較して、この銘柄固有の強み・弱みは何か。
 5. 結論: 定量シグナルを支持するか、それとも定量が見落としている致命的な要因があるか。
 
-※ 私は投資判断を自分で行います。推奨ではなく、判断材料としての事実と論点を提示してください。`;
+※ 私は投資判断を自分で行います。推奨ではなく、判断材料としての事実と論点を提示してください。
+※ 「データなし」の項目は、無料データソースの制約で取得できていないだけです。あなた自身の調査で補ってください。`;
 }
 
 /* ==================================================================== UI */
@@ -2434,7 +2458,21 @@ export default function StockScout() {
   };
 
   const copyPrompt = (s, hits) => {
-    const t = geminiPrompt(s, hits, snap?.asof);
+    /* ■ 防御的措置
+       これから先の処理のどこかで予期せぬ例外が起きても、ボタンが
+       「何も反応しない」状態にはさせない。必ず何らかのフィードバック
+       (エラー表示、または手動コピー用のテキスト)を出す。
+       実際に、以前は geminiPrompt() 内で欠損データに .toFixed() を
+       呼んで例外が発生し、これ以降の処理(ウィンドウを開く・コピーする)が
+       一切実行されずに「押しても無反応」になっていた。 */
+    let t;
+    try {
+      t = geminiPrompt(s, hits, snap?.asof);
+    } catch (e) {
+      console.error("geminiPrompt の生成に失敗:", e);
+      setPromptFallback(`(プロンプトの自動生成に失敗しました。手動で調べてください: ${s.code} ${s.name})`);
+      return;
+    }
 
     /* ■ ポップアップブロック対策(重要)
        以前は navigator.clipboard.writeText() の Promise 完了後に
@@ -2461,6 +2499,7 @@ export default function StockScout() {
         setPromptFallback(t);
       }
     };
+
 
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(t).then(done).catch(fallbackCopy);
