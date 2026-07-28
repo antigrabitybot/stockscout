@@ -45,17 +45,20 @@ export async function resolveJpUniverse(client) {
   const info = await client.listedInfo();
   const byCode = new Map();
   for (const r of info) {
-    const code = String(r.Code ?? "").slice(0, 4);
+    const code = String(r.Code ?? r.code ?? "").slice(0, 4);
     if (!code) continue;
     byCode.set(code, {
       code,
-      name: r.CompanyName ?? r.CompanyNameEnglish ?? code,
-      sector: r.Sector33CodeName ?? "",
-      market: r.MarketCodeName ?? "",
-      listingDate: r.ListingDate ?? null,
+      name: r.CompanyName ?? r.CompanyNameEnglish ?? r.companyName ?? code,
+      sector: r.Sector33CodeName ?? r.sector33CodeName ?? "",
+      market: r.MarketCodeName ?? r.marketCodeName ?? r.MarketCode ?? r.marketCode ?? "",
+      listingDate: r.ListingDate ?? r.listingDate ?? null,
     });
   }
   console.log(`  上場銘柄: ${byCode.size} 件`);
+  if (info[0]) {
+    console.log("  [診断] レスポンス1件目のフィールド名:", Object.keys(info[0]).join(", "));
+  }
 
   // 直近営業日の全銘柄出来高から売買代金を推定し、プライム上位を決める
   console.log("  直近営業日の全銘柄株価を取得(売買代金順位の算出用)...");
@@ -76,8 +79,16 @@ export async function resolveJpUniverse(client) {
     turnover.set(code, tv);
   }
 
-  const prime = [...byCode.values()].filter((s) => /プライム|Prime/.test(s.market));
-  const growth = [...byCode.values()].filter((s) => /グロース|Growth/.test(s.market));
+  const prime = [...byCode.values()].filter((s) => /プライム|Prime|^0111$/.test(s.market));
+  const growth = [...byCode.values()].filter((s) => /グロース|Growth|^0113$/.test(s.market));
+  console.log(`  [診断] プライム判定 ${prime.length}件 / グロース判定 ${growth.length}件`);
+  if (prime.length === 0 && growth.length === 0) {
+    /* 市場区分の判定が0件になるのは、フィールド名または値の形式が
+       想定と違う場合。実際に何が入っているかをログに残し、
+       次回の修正に使える情報を確保する(黙って0件のまま進めない)。 */
+    const sample = [...byCode.values()].slice(0, 5).map((s) => `${s.code}:market="${s.market}"`);
+    console.warn(`  [警告] プライム/グロースの判定が0件でした。market値の実例: ${sample.join(", ")}`);
+  }
   prime.sort((a, b) => (turnover.get(b.code) || 0) - (turnover.get(a.code) || 0));
 
   const selected = new Map();

@@ -14,21 +14,34 @@
  *   JSONで約半分になる)。gzip後の想定サイズは1,300銘柄×5年で10〜20MB程度。
  *
  * ■ 保存先の切り替え
- *   環境変数 STORE_BACKEND=local | gdrive (既定: gdrive設定があればgdrive)
- *   local  … ./store/price-store.json.gz (Drive設定前のテスト用)
+ *   環境変数 STORE_BACKEND=local | gdrive | github (既定: github)
+ *   local  … ./store/price-store.json.gz (手元での動作確認用)
  *   gdrive … Google Drive のフォルダ内 price-store.json.gz
- *   同じコードがどちらでも動くので、今夜ローカルで動作確認 → 帰宅後に
- *   Drive設定を入れて STORE_BACKEND を切り替えるだけで移行できる。
+ *   github … このリポジトリの GitHub Releases にアセットとして保存(既定)
+ *
+ * ■ なぜ既定を github にしたか(Google Drive からの方針転換の経緯)
+ *   当初 Google Drive のサービスアカウント方式で実装したが、実機で
+ *   「Service Accounts do not have storage quota」という Google 側の
+ *   仕様上の壁(2023年6月以降、個人アカウントのフォルダにサービス
+ *   アカウントが新規ファイルを作成できない)に阻まれた。Shared Drive は
+ *   Google Workspace(有料)が要るため個人利用に現実的でない。
+ *   GitHub Actions には追加設定なしで GITHUB_TOKEN が渡されるため、
+ *   GitHub Releases をストレージとして使えば外部サービスのアカウント
+ *   設定が一切不要になる。gdrive 方式のコードは(OAuthユーザー委任を
+ *   将来的に実装したくなった場合のために)残してあるが、現状は
+ *   github 方式を使うことを推奨する。
  */
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { GDrive } from "./gdrive.mjs";
+import { GitHubStore } from "./github-store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_DIR = path.join(__dirname, "..", "store");
 const FILE_NAME = "price-store.json.gz";
+const VALID_BACKENDS = ["local", "gdrive", "github"];
 
 export function emptyStore() {
   return { version: 1, updatedAt: null, jp: {}, us: {} };
@@ -38,21 +51,21 @@ function backend() {
   const explicit = process.env.STORE_BACKEND;
   if (explicit) {
     /* ■ なぜ検証するか
-       以前のイテレーションで STORE_BACKEND=github (GitHub Releases に
-       保存する設計)を試したことがあり、その値がワークフロー側の
-       env: に残ったまま Google Drive 版のコードに切り替わると、
-       未知の値("github")が else 分岐で暗黙的に「local」として扱われ、
-       Drive には一切書き込まれないまま「成功」してしまう事故が実際に
-       起きた。無効な値は握り潰さず、ここで必ず止める。 */
-    if (explicit !== "local" && explicit !== "gdrive") {
+       過去に無効な値(古い設計の名残)が環境変数に残ったまま気づかず、
+       意図しないバックエンドに黙って切り替わってしまう事故が実際に
+       起きた。有効な3値以外は握り潰さず、ここで必ず止める。 */
+    if (!VALID_BACKENDS.includes(explicit)) {
       throw new Error(
-        `STORE_BACKEND の値が不正です: "${explicit}"(有効な値: "local" または "gdrive")。` +
+        `STORE_BACKEND の値が不正です: "${explicit}"(有効な値: ${VALID_BACKENDS.map((v) => `"${v}"`).join("/")})。` +
         `ワークフローファイル(.github/workflows/*.yml)に古い設定が残っていないか確認してください。`
       );
     }
     return explicit;
   }
-  return process.env.GDRIVE_SERVICE_ACCOUNT_JSON && process.env.GDRIVE_FOLDER_ID ? "gdrive" : "local";
+  // 明示指定が無ければ github(GitHub Actions なら GITHUB_TOKEN が自動で入る)
+  if (process.env.GITHUB_TOKEN && process.env.GITHUB_REPOSITORY) return "github";
+  if (process.env.GDRIVE_SERVICE_ACCOUNT_JSON && process.env.GDRIVE_FOLDER_ID) return "gdrive";
+  return "local";
 }
 
 function gdrive() {
@@ -60,6 +73,10 @@ function gdrive() {
     serviceAccountJson: process.env.GDRIVE_SERVICE_ACCOUNT_JSON,
     folderId: process.env.GDRIVE_FOLDER_ID,
   });
+}
+
+function githubStore() {
+  return new GitHubStore({ token: process.env.GITHUB_TOKEN });
 }
 
 /** ストアを読み込む。存在しなければ空ストアを返す(初回バックフィル用)。 */
@@ -74,6 +91,9 @@ export async function loadStore() {
       buf = await gd.download(f.id);
       console.log(`  [store] Drive から ${(buf.length / 1024 / 1024).toFixed(1)} MB 取得`);
     }
+  } else if (be === "github") {
+    buf = await githubStore().download(FILE_NAME);
+    if (buf) console.log(`  [store] GitHub Releases から ${(buf.length / 1024 / 1024).toFixed(1)} MB 取得`);
   } else {
     const p = path.join(LOCAL_DIR, FILE_NAME);
     if (fs.existsSync(p)) buf = fs.readFileSync(p);
@@ -102,6 +122,8 @@ export async function saveStore(store, explicitDate) {
   console.log(`  [store] 保存 (backend=${be}) raw ${(raw.length / 1024 / 1024).toFixed(1)}MB → gz ${(gz.length / 1024 / 1024).toFixed(1)}MB`);
   if (be === "gdrive") {
     await gdrive().upload(FILE_NAME, gz);
+  } else if (be === "github") {
+    await githubStore().upload(FILE_NAME, gz);
   } else {
     fs.mkdirSync(LOCAL_DIR, { recursive: true });
     fs.writeFileSync(path.join(LOCAL_DIR, FILE_NAME), gz);
