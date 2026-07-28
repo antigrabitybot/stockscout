@@ -47,18 +47,20 @@ export async function resolveJpUniverse(client) {
   for (const r of info) {
     const code = String(r.Code ?? r.code ?? "").slice(0, 4);
     if (!code) continue;
+    /* ■ 実機で確認できた V2 の実際のフィールド名(省略形)
+       Date, Code, CoName, CoNameEn, S17, S17Nm, S33, S33Nm,
+       ScaleCat, Mkt, MktNm, Mrgn, MrgnNm, ProdCat
+       (公式ドキュメントのサンプルはフル名だったが、実際のレスポンスは
+       省略形だった。株価・財務情報と同じパターン。実データで確認済み) */
     byCode.set(code, {
       code,
-      name: r.CompanyName ?? r.CompanyNameEnglish ?? r.companyName ?? code,
-      sector: r.Sector33CodeName ?? r.sector33CodeName ?? "",
-      market: r.MarketCodeName ?? r.marketCodeName ?? r.MarketCode ?? r.marketCode ?? "",
-      listingDate: r.ListingDate ?? r.listingDate ?? null,
+      name: r.CoName ?? r.CompanyName ?? r.CoNameEn ?? r.CompanyNameEnglish ?? code,
+      sector: r.S33Nm ?? r.Sector33CodeName ?? "",
+      market: r.MktNm ?? r.MarketCodeName ?? r.Mkt ?? r.MarketCode ?? "",
+      listingDate: r.ListingDate ?? r.listingDate ?? null, // 上場日はこのエンドポイントに無い(DATA_LIMITATIONS.md参照)
     });
   }
   console.log(`  上場銘柄: ${byCode.size} 件`);
-  if (info[0]) {
-    console.log("  [診断] レスポンス1件目のフィールド名:", Object.keys(info[0]).join(", "));
-  }
 
   // 直近営業日の全銘柄出来高から売買代金を推定し、プライム上位を決める
   console.log("  直近営業日の全銘柄株価を取得(売買代金順位の算出用)...");
