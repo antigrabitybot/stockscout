@@ -1,37 +1,46 @@
-name: StockScout Daily Batch
+name: StockScout Daily Update
 
-# 東証・NYSE/NASDAQ の引け後、日本時間の早朝に実行する想定。
-# J-Quants は毎日17:00頃にその日の株価を配信するため、UTC 21:00(JST翌6:00)に設定。
-# 実データでの初回投入時は workflow_dispatch で手動実行し、挙動を必ず確認すること。
+# 平日の東証大引け後、その日の終値ベースで差分取得してストア(Google Drive)に
+# 追記し、snapshot.json / backtest.json を再計算してコミットする。
+# 初回は先に "StockScout Backfill" を手動実行してストアを作っておくこと。
+#
+# ■ 実行時刻の根拠(2026年7月時点の公式情報に基づく想定)
+#   J-Quants公式ヘルプ: 「株価四本値は営業日の大引け後に当日分が更新」。
+#   過去の実績としては17時頃という報告が多いが、公式は正確な時刻を
+#   保証しておらず「実際は前後する可能性がある」とも明記している。
+#   そのため 17:00 ちょうどではなく、30分の余裕を見て 17:30 JST に設定。
+#   もし実行のたびに「配信待ちのためスキップ」ログが出るようなら、
+#   この cron を 17:45 や 18:00 に後ろ倒しすること(daily-update.mjs 側は
+#   未配信を検知しても壊れず、次回に正しく再取得する設計にしてある)。
 on:
   schedule:
-    - cron: "0 21 * * 1-5"  # 平日 UTC21:00 = JST翌朝6:00
+    - cron: "30 8 * * 1-5"  # 平日 UTC08:30 = JST17:30
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  update:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "20"
 
       - name: 共有ロジックを StockScout.jsx から自動抽出
         run: node scripts/extract-logic.mjs
 
-      - name: 日次バッチ実行(J-Quants + Stooq + GAS → snapshot.json / history.json)
+      - name: 日次差分更新(ストア追記 → snapshot.json / backtest.json 再計算)
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           GAS_US_STOCK_PROXY_URL: ${{ secrets.GAS_US_STOCK_PROXY_URL }}
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: node batch/build-snapshot.mjs
+        run: node batch/daily-update.mjs
 
       - uses: actions/setup-python@v5
         with:
@@ -43,13 +52,14 @@ jobs:
         run: python3 notify_discord.py
 
       - name: 生成物をコミット
-        # main ブランチへの push が、Vercel の自動デプロイをトリガーする。
-        # つまりこのコミットが完了すると、数分後にはサイトの表示データも
-        # 最新化される(Vercel 側で追加設定は不要)。
+        # main への push が Vercel の自動デプロイをトリガーする。
+        # 価格ストア本体は Google Drive にあり、リポジトリには入らない
+        # (肥大化防止・J-Quants再配布禁止の両面)。コミットするのは
+        # 表示用の軽量ファイルのみ。
         run: |
           git config user.name "stockscout-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add public/data/snapshot.json public/data/history.json
+          git add public/data/snapshot.json public/data/backtest.json
           git add -f .state/notified.json
-          git diff --cached --quiet || git commit -m "chore: daily snapshot $(date -u +%Y-%m-%d)"
+          git diff --cached --quiet || git commit -m "chore: daily update $(date -u +%Y-%m-%d)"
           git push
