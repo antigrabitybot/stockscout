@@ -91,7 +91,24 @@ export class JQuantsClient {
     return { "x-api-key": this.apiKey };
   }
 
-  /** 上場銘柄一覧。市場区分・33業種区分・上場日を含む。 */
+  /**
+   * 上場銘柄一覧。市場区分・33業種区分を含む。
+   *
+   * ■ 修正の経緯
+   *   財務情報(/fins/statements→/fins/summary)と同様、V1のパス名
+   *   (/listed/info)のまま実装していたが、実機で「エンドポイントが
+   *   存在しない」(HTTP 403)というエラーが発生した。公式ヘルプ
+   *   (jpx-jquants.com/ja/help/about)のV1→V2対応表を確認したところ、
+   *   正しいV2パスは /equities/master であることが判明した。
+   *
+   * ■ 未確認の注意点(正直な申し送り)
+   *   公式ドキュメントで確認できたレスポンス例には、上場日を示す
+   *   フィールド(ListingDate 等)が含まれていなかった。もし実際に
+   *   欠落している場合、Kemmo式中長期手法が前提とする「上場10年以内」
+   *   の判定ができず、この手法は実データでは0件になる可能性がある。
+   *   実行してみて該当フィールドの有無を確認し、無ければ
+   *   DATA_LIMITATIONS.md に「取得不可」として明記する。
+   */
   async listedInfo(date) {
     let out = [];
     let cursor = null;
@@ -100,7 +117,7 @@ export class JQuantsClient {
       if (date) params.date = ymd(date);
       if (cursor) params.cursor = cursor;
       const q = new URLSearchParams(params);
-      const url = `${BASE}/listed/info${q.toString() ? "?" + q : ""}`;
+      const url = `${BASE}/equities/master${q.toString() ? "?" + q : ""}`;
       const data = await fetchJson(url, { headers: this._headers() });
       out = out.concat(extractArray(data, ["info", "data"], url));
       cursor = data.cursor || data.pagination_key || null;
