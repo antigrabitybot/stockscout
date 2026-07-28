@@ -1,6 +1,6 @@
 name: StockScout Daily Update
 
-# 平日の東証大引け後、その日の終値ベースで差分取得してストア(Google Drive)に
+# 平日の東証大引け後、その日の終値ベースで差分取得してストア(GitHub Releases)に
 # 追記し、snapshot.json / backtest.json を再計算してコミットする。
 # 初回は先に "StockScout Backfill" を手動実行してストアを作っておくこと。
 #
@@ -18,7 +18,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: write   # git push に加え、GitHub Releases へのアップロードにも使う
 
 jobs:
   update:
@@ -38,8 +38,7 @@ jobs:
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
           GAS_US_STOCK_PROXY_URL: ${{ secrets.GAS_US_STOCK_PROXY_URL }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node batch/daily-update.mjs
 
       - uses: actions/setup-python@v5
@@ -53,9 +52,9 @@ jobs:
 
       - name: 生成物をコミット
         # main への push が Vercel の自動デプロイをトリガーする。
-        # 価格ストア本体は Google Drive にあり、リポジトリには入らない
-        # (肥大化防止・J-Quants再配布禁止の両面)。コミットするのは
-        # 表示用の軽量ファイルのみ。
+        # 価格ストア本体は GitHub Releases のアセットにあり、通常の
+        # リポジトリファイルとしては入らない(肥大化防止・
+        # J-Quants再配布禁止の両面)。コミットするのは表示用の軽量ファイルのみ。
         run: |
           git config user.name "stockscout-bot"
           git config user.email "actions@users.noreply.github.com"

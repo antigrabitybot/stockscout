@@ -1,15 +1,22 @@
 name: StockScout Backfill (one-time)
 
 # 初回だけ手動実行する、5年分ヒストリカルの一括取得。
-# 約970銘柄 × 数十分。ストア(price-store.json.gz)を Google Drive に作成する。
+# 約970銘柄 × 数十分。ストアは GitHub Releases にアセットとして保存する
+# (追加の外部サービス設定が不要。GITHUB_TOKEN は Actions が自動的に渡す)。
 # これが完了してから、毎日の "StockScout Daily Update" が差分追記を始められる。
 #
 # 実行方法: GitHub の Actions タブ → このワークフロー → "Run workflow"
+#
+# ■ Google Drive から GitHub Releases への切り替えについて
+#   当初 Google Drive での実装を試みたが、サービスアカウントには
+#   ストレージ容量が無いという Google 側の仕様(2023年6月以降)に阻まれ、
+#   個人アカウントでは動作しないことが実機検証で判明した。GitHub には
+#   追加設定なしで書き込み権限付きトークンが渡せるため、こちらに変更した。
 on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write   # GitHub Releases へのアップロードに必要
 
 jobs:
   backfill:
@@ -25,9 +32,8 @@ jobs:
       - name: 共有ロジックを StockScout.jsx から自動抽出
         run: node scripts/extract-logic.mjs
 
-      - name: 5年分バックフィル(全銘柄 → Google Drive のストアへ保存)
+      - name: 5年分バックフィル(全銘柄 → GitHub Releases のストアへ保存)
         env:
           JQUANTS_API_KEY: ${{ secrets.JQUANTS_API_KEY }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node batch/backfill.mjs
