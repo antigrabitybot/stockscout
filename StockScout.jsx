@@ -2394,7 +2394,8 @@ export default function StockScout() {
      「新たに買い増し/売りシグナルが立った銘柄」だけを通知する(既存銘柄の
      連日の再通知は行わない。仕様は Discord 通知の設計と同じ思想)。
 
-     このクライアント側では、snap(前日終値データ)が更新されるたびに
+     このクライアント側では、snap(その日の終値データ。配信タイミングにより
+     前営業日終値のこともある)が更新されるたびに
      全保有銘柄を再評価することで、その日次バッチの動作を再現している。
      つまり「ページを開く」ことが「本日分のバッチが1回走る」ことに相当する。
   --------------------------------------------------------------------- */
@@ -2551,7 +2552,7 @@ export default function StockScout() {
       <div className="bar">
         <div className="bar-in">
           <div className="logo">Stock<span>Scout</span></div>
-          <div className="asof mono">前日終値 {snap.asof}</div>
+          <div className="asof mono">{snap.asof} 終値</div>
           <div className="mkt-toggle">
             {["JP", "US"].map((m) => (
               <button key={m} data-on={market === m ? 1 : 0} onClick={() => setMarket(m)}>{m === "JP" ? "日本株" : "米国株"}</button>
@@ -2592,7 +2593,7 @@ export default function StockScout() {
           <>
             <h1 className="h1">今日の推薦</h1>
             <p className="sub">
-              前日終値時点のデータで {visible.length} 手法を実行しました。条件を満たす銘柄が無い手法は「0件」と表示します。無理に推薦はしません。
+              {snap.asof} 終値時点のデータで {visible.length} 手法を実行しました。条件を満たす銘柄が無い手法は「0件」と表示します。無理に推薦はしません。
             </p>
 
             {!rg.above200 && (

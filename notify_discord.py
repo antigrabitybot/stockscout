@@ -72,7 +72,7 @@ def build_embeds(strong, asof):
                 {"name": "PBR", "value": f"{s['pbr']:.2f}倍", "inline": True},
                 {"name": "ROE", "value": f"{s['roe']*100:.1f}%", "inline": True},
             ],
-            "footer": {"text": f"前日終値 {asof} ・ 機械的な条件抽出であり投資助言ではありません"},
+            "footer": {"text": f"{asof} 終値 ・ 機械的な条件抽出であり投資助言ではありません"},
         })
     return embeds
 
