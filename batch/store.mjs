@@ -36,7 +36,22 @@ export function emptyStore() {
 
 function backend() {
   const explicit = process.env.STORE_BACKEND;
-  if (explicit) return explicit;
+  if (explicit) {
+    /* ■ なぜ検証するか
+       以前のイテレーションで STORE_BACKEND=github (GitHub Releases に
+       保存する設計)を試したことがあり、その値がワークフロー側の
+       env: に残ったまま Google Drive 版のコードに切り替わると、
+       未知の値("github")が else 分岐で暗黙的に「local」として扱われ、
+       Drive には一切書き込まれないまま「成功」してしまう事故が実際に
+       起きた。無効な値は握り潰さず、ここで必ず止める。 */
+    if (explicit !== "local" && explicit !== "gdrive") {
+      throw new Error(
+        `STORE_BACKEND の値が不正です: "${explicit}"(有効な値: "local" または "gdrive")。` +
+        `ワークフローファイル(.github/workflows/*.yml)に古い設定が残っていないか確認してください。`
+      );
+    }
+    return explicit;
+  }
   return process.env.GDRIVE_SERVICE_ACCOUNT_JSON && process.env.GDRIVE_FOLDER_ID ? "gdrive" : "local";
 }
 
