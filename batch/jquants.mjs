@@ -91,11 +91,21 @@ export class JQuantsClient {
     return { "x-api-key": this.apiKey };
   }
 
-  /** 上場銘柄一覧。市場区分・33業種区分を含む。 */
+  /** 上場銘柄一覧。市場区分・33業種区分・上場日を含む。 */
   async listedInfo(date) {
-    const q = date ? `?date=${ymd(date)}` : "";
-    const data = await fetchJson(`${BASE}/listed/info${q}`, { headers: this._headers() });
-    return extractArray(data, ["info", "data"], `${BASE}/listed/info`);
+    let out = [];
+    let cursor = null;
+    do {
+      const params = {};
+      if (date) params.date = ymd(date);
+      if (cursor) params.cursor = cursor;
+      const q = new URLSearchParams(params);
+      const url = `${BASE}/listed/info${q.toString() ? "?" + q : ""}`;
+      const data = await fetchJson(url, { headers: this._headers() });
+      out = out.concat(extractArray(data, ["info", "data"], url));
+      cursor = data.cursor || data.pagination_key || null;
+    } while (cursor);
+    return out;
   }
 
   /**
@@ -156,6 +166,23 @@ export class JQuantsClient {
     let cursor = null;
     do {
       const params = { code };
+      if (cursor) params.cursor = cursor;
+      const q = new URLSearchParams(params);
+      const url = `${BASE}/fins/summary?${q}`;
+      const data = await fetchJson(url, { headers: this._headers() });
+      out = out.concat(extractArray(data, ["data", "statements"], url));
+      cursor = data.cursor || data.pagination_key || null;
+    } while (cursor);
+    return out.map(normalizeStatement);
+  }
+
+  /** 財務情報を「開示日」単位で取得する(日次差分更新用)。
+   *  銘柄単位の statements() と同じ正規化を通して返す。 */
+  async statementsByDate(date) {
+    let out = [];
+    let cursor = null;
+    do {
+      const params = { date: ymd(date) };
       if (cursor) params.cursor = cursor;
       const q = new URLSearchParams(params);
       const url = `${BASE}/fins/summary?${q}`;

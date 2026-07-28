@@ -1,4 +1,15 @@
 /**
+ * ⚠️ 非推奨(DEPRECATED) — このファイルは旧設計です。
+ * ----------------------------------------------------------------------------
+ * 90銘柄程度を毎日フルスクラッチで取得していた旧方式。現在は以下に置き換え:
+ *   ・backfill.mjs      … 初回1回、5年分をGoogle Driveのストアへ
+ *   ・daily-update.mjs  … 毎日、前日分だけをストアに追記
+ *   ・build-outputs.mjs … ストアから snapshot.json / backtest.json を計算
+ * 参照用に残しているが、GitHub Actions からは呼ばれない。新規運用では使わないこと。
+ * ----------------------------------------------------------------------------
+ */
+
+/**
  * build-snapshot.mjs — 日次バッチのメイン処理
  * ----------------------------------------------------------------------------
  * 実行順序:
@@ -67,17 +78,25 @@ function attachGroupRS(universe, market) {
 /** 株主優待銘柄リスト(任意・手動管理)。batch/yutai-jp.json に
  *  ["7203", "8591", ...] の形式で置くと、権利取り系手法のスコアが強化される。
  *  無料の構造化データが存在しないため手動管理(DATA_LIMITATIONS.md 参照)。 */
-function loadYutaiSet() {
-  const p = path.join(__dirname, "yutai-jp.json");
+/** 補助リスト(任意・手動管理)を読み込む汎用関数。
+ *  batch/{filename} に銘柄コードの配列 ["7203", ...] を置くと Set で返す。
+ *  無料の構造化データが存在しない属性(優待/日経225採用/オーナー経営)を
+ *  手動で補うための仕組み。未整備でも該当手法は取得可能な条件のみで動作する。 */
+function loadCodeSet(filename, label) {
+  const p = path.join(__dirname, filename);
   if (!fs.existsSync(p)) return null;
   try {
     const arr = JSON.parse(fs.readFileSync(p, "utf8"));
-    console.log(`  株主優待リスト: ${arr.length} 銘柄を読み込み`);
+    console.log(`  ${label}: ${arr.length} 銘柄を読み込み`);
     return new Set(arr.map(String));
   } catch (e) {
-    console.warn(`  [警告] yutai-jp.json の読み込みに失敗: ${e.message}`);
+    console.warn(`  [警告] ${filename} の読み込みに失敗: ${e.message}`);
     return null;
   }
+}
+
+function loadYutaiSet() {
+  return loadCodeSet("yutai-jp.json", "株主優待リスト");
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -100,9 +119,23 @@ function loadUniverseList(marketFile, fallback) {
   return fallback;
 }
 
-async function buildJpUniverse(client, list, yutaiSet) {
+async function buildJpUniverse(client, list, sets) {
   const to = today();
   const from = new Date(Date.now() - 5 * 365 * 86400_000).toISOString().slice(0, 10); // Light plan上限=5年
+
+  // 上場日・市場区分は listed/info から一括取得(1回のAPIで全銘柄分)
+  let infoByCode = new Map();
+  try {
+    const info = await client.listedInfo();
+    for (const r of info) {
+      const c4 = String(r.Code ?? r.code ?? "").slice(0, 4);
+      if (c4) infoByCode.set(c4, r);
+    }
+    console.log(`  listed/info: ${infoByCode.size} 銘柄のメタ情報を取得`);
+  } catch (e) {
+    console.warn(`  [警告] listed/info の取得に失敗(上場年数・市場区分が空になります): ${e.message}`);
+  }
+
   const out = [];
   let i = 0;
   for (const [code, name, sector] of list) {
@@ -113,13 +146,20 @@ async function buildJpUniverse(client, list, yutaiSet) {
         client.dailyQuotesByCode(code, from, to),
         client.statements(code),
       ]);
-      const entry = buildStockEntry({ Code: code, CompanyName: name, Sector33CodeName: sector }, quotes, statements, { yutaiSet });
+      const info = infoByCode.get(code) || {};
+      const meta = {
+        Code: code, CompanyName: name, Sector33CodeName: sector,
+        ListingDate: info.ListingDate ?? info.listingDate ?? null,
+        MarketCodeName: info.MarketCodeName ?? info.marketCodeName ?? null,
+      };
+      const entry = buildStockEntry(meta, quotes, statements, {
+        yutaiSet: sets?.yutaiSet, nikkeiSet: sets?.nikkeiSet, ownerSet: sets?.ownerSet,
+      });
       if (entry) { out.push(entry); console.log(`OK (${entry.history.length}日)`); }
       else console.log("SKIP (履歴不足)");
     } catch (e) {
       console.log(`FAIL: ${e.message}`);
     }
-    // API負荷を抑えるための簡易ウェイト(公式のレート制限値が非公開のため保守的に)
     await new Promise((r) => setTimeout(r, 150));
   }
   return out;
@@ -262,8 +302,12 @@ async function main() {
 
   console.log("\n=== 2. 日本株ユニバース取得 ===");
   const jpList = loadUniverseList("universe-jp.json", JP_NAMES);
-  const yutaiSet = loadYutaiSet();
-  const jpUniverse = await buildJpUniverse(client, jpList, yutaiSet);
+  const sets = {
+    yutaiSet: loadYutaiSet(),
+    nikkeiSet: loadCodeSet("nikkei225-jp.json", "日経225採用リスト"),
+    ownerSet: loadCodeSet("owner-managed-jp.json", "オーナー経営リスト"),
+  };
+  const jpUniverse = await buildJpUniverse(client, jpList, sets);
   console.log(`OK: ${jpUniverse.length}/${jpList.length} 銘柄`);
 
   console.log("\n=== 3. 米国株ユニバース取得 ===");

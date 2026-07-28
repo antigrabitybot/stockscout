@@ -93,7 +93,8 @@ export function buildFundDaily(history, rawStatements) {
     "evEbitda", "fscore", "grossProf", "accrual", "epsGrowthQ", "epsGrowthY",
     "earnYield", "psr", "peg", "altmanZ", "ncavRatio", "streak", "roeYears",
     "salesAccel", "opAccel", "earnStability", "sizeDecile", "opMarginTrend",
-    "turnaround", "daysToRights", "daysSinceRights", "earningsInDays"];
+    "turnaround", "daysToRights", "daysSinceRights", "earningsInDays",
+    "opMargin", "capexRatio"];
   const out = {};
   for (const k of keys) out[k] = new Array(len).fill(null);
 
@@ -176,6 +177,11 @@ export function buildFundDaily(history, rawStatements) {
     out.roeYears[i] = streaks.roeYears;
     out.earnStability[i] = streaks.stability;
     out.opMarginTrend[i] = streaks.opMarginTrend;
+
+    // 営業利益率 = 営業利益 / 売上高(ちょる子式・Kemmo式の高収益判定に使用)
+    if (cur.op != null && cur.sales && cur.sales > 0) out.opMargin[i] = cur.op / cur.sales;
+    // 設備投資比率は Light プランで CapEx が取れないため null のまま
+    // (該当条件を使う手法はこの指標を必須にしていない。DATA_LIMITATIONS.md 参照)
 
     // 黒字転換: 直近通期が黒字 かつ その前の通期が赤字
     out.turnaround[i] = streaks.turnaround ? 1 : 0;
@@ -371,11 +377,21 @@ export function buildStockEntry(meta, quotes, statements, opts = {}) {
     streak: lastValid(fundDaily.streak) || 0, roeYears: lastValid(fundDaily.roeYears) || 0,
     salesAccel: lastValid(fundDaily.salesAccel) || 0, opAccel: lastValid(fundDaily.opAccel) || 0,
     earnStability: lastValid(fundDaily.earnStability), opMarginTrend: lastValid(fundDaily.opMarginTrend) || 0,
+    opMargin: lastValid(fundDaily.opMargin), capexRatio: null,
     turnaround: lastValid(fundDaily.turnaround) === 1,
     daysToRights: lastValid(fundDaily.daysToRights),
     daysSinceRights: lastValid(fundDaily.daysSinceRights),
     earningsInDays: lastValid(fundDaily.earningsInDays),
     hasYutai: opts.yutaiSet ? opts.yutaiSet.has(meta.Code?.slice(0, 4) || meta.Code) : false,
+    // 上場からの年数(listed/info の上場日から算出。無ければ null)
+    yearsSinceListing: meta.ListingDate ? yearsSince(meta.ListingDate) : null,
+    // 以下は無料の構造化データが無く、補助リスト依存(build-snapshot 側で付与)。
+    // リスト未整備なら null/false のまま = 該当手法は上場年数等の取得可能条件のみで動く
+    ownerManaged: opts.ownerSet ? opts.ownerSet.has(meta.Code?.slice(0, 4) || meta.Code) : null,
+    irFrequency: null,
+    downwardRevisions: null,
+    inNikkei225: opts.nikkeiSet ? opts.nikkeiSet.has(meta.Code?.slice(0, 4) || meta.Code) : false,
+    isPrime: meta.MarketCodeName ? /プライム|Prime/.test(meta.MarketCodeName) : false,
     // --- 当面データ源なし(DATA_LIMITATIONS.md 参照)。null のまま=手法が自然に0件になる ---
     grossProf: null, altmanZ: null, ncavRatio: null,
     // --- イベント系(データ源なし。将来 TDnet 連携で埋める) ---
@@ -394,6 +410,13 @@ export function buildStockEntry(meta, quotes, statements, opts = {}) {
 function lastValid(arr) {
   for (let i = arr.length - 1; i >= 0; i--) if (arr[i] != null) return arr[i];
   return null;
+}
+
+/** 指定日から現在までの年数(小数)。上場年数の算出に使う。 */
+function yearsSince(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  return (Date.now() - d.getTime()) / (365.25 * 86400_000);
 }
 
 function avgTrueRange(recent) {

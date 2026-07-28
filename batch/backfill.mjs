@@ -1,416 +1,171 @@
 /**
- * backfill.mjs — 初回のみ実行するバックフィル処理
+ * backfill.mjs — 初回1回だけ実行する、5年分ヒストリカルの一括取得
  * ----------------------------------------------------------------------------
- * このスクリプトは「初回 1 回だけ」実行する。
- * 全銘柄 5 年分の OHLCV を price-store.json.gz として保存し、
- * 以降の日次バッチが差分追記で高速に動作できるようにする。
+ * 実行: GitHub Actions の "StockScout Backfill (one-time)" を手動実行するか、
+ *       ローカルで:
+ *         JQUANTS_API_KEY=... STORE_BACKEND=local node batch/backfill.mjs
  *
- * ■ STORE_BACKEND 環境変数
- *   github  → GitHub Releases にストアを保存（デフォルト。追加設定不要）
- *   local   → ./store/ フォルダに保存（ローカルテスト用）
- *   gdrive  → Google Drive（サービスアカウントのストレージ制限により非推奨）
+ * 所要時間の目安: 約1,300銘柄 × 1.2秒 ≈ 30〜60分。
+ * 1回きりの処理なので、時間がかかっても問題ない(ユーザー合意済み)。
  *
- * ■ 実行方法
- *   # GitHub Actions（自動。GITHUB_TOKEN は Actions が自動提供）
- *   → Actions タブ → StockScout Backfill (one-time) → Run workflow
- *
- *   # ローカルテスト（Google Drive / GitHub 不要）
- *   $env:JQUANTS_API_KEY="xxx"; $env:STORE_BACKEND="local"; node batch/backfill.mjs
- *
- * ■ 所要時間の目安
- *   日本株 ~450銘柄 × 5年 ≒ 15~20分
- *   米国株 ~503銘柄 × 5年 ≒ 20~30分
- *   合計   約40~50分（ネットワーク状況による）
+ * ■ ユニバース(対象銘柄)の決め方
+ *   日本株:
+ *     (a) プライム市場のうち、直近営業日の売買代金 上位250銘柄(自動導出)
+ *         → 日経225の無料で信頼できる構成リストが存在しないため、
+ *           「大型・高流動性」という実質を自動でカバーする代理。日経225と
+ *           大部分が重なり、かつ入れ替えメンテナンスが不要。
+ *     (b) グロース市場の全銘柄(自動導出、約550銘柄)
+ *     (c) batch/nikkei225-jp.json があれば、その銘柄を強制的に追加
+ *         (正確な日経225リストを後から手で置けば、それも必ず含まれる)
+ *   米国株:
+ *     batch/universe-sp500.json (S&P500構成銘柄。GitHub公開データセット
+ *     datasets/s-and-p-500-companies から生成済み・503銘柄)
  */
-
 import fs from "node:fs";
 import path from "node:path";
-import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { JQuantsClient } from "./jquants.mjs";
 import { fetchStooqHistory } from "./stooq.mjs";
-import { JP_NAMES, US_NAMES } from "../logic.mjs";
+import { loadStore, saveStore, emptyStore, appendBars, appendStmts, quoteToBar, stooqToBar } from "./store.mjs";
 
-const gzip   = promisify(zlib.gzip);
-const gunzip = promisify(zlib.gunzip);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PRIME_TOP_N = 250;
+const FIVE_YEARS_AGO = new Date(Date.now() - 5 * 365 * 86400_000).toISOString().slice(0, 10);
+const TODAY = new Date().toISOString().slice(0, 10);
 
-const __dirname       = path.dirname(fileURLToPath(import.meta.url));
-const ROOT            = path.join(__dirname, "..");
-const LOCAL_STORE_DIR = path.join(ROOT, "store");
-const STORE_FILE      = "price-store.json.gz";
-const BACKEND         = process.env.STORE_BACKEND || "github";
-
-// GitHub Releases の設定
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
-const GITHUB_REPO  = process.env.GITHUB_REPOSITORY || ""; // 例: "antigrabitybot/stockscout"
-const RELEASE_TAG  = "price-store-data";
-const RELEASE_NAME = "Price Store (auto-generated, do not delete)";
-
-// --------------------------------------------------------------------------
-// ストアの読み書き（バックエンドを透過的に扱う）
-// --------------------------------------------------------------------------
-
-async function loadStore() {
-  if (BACKEND === "local") return localLoad();
-  if (BACKEND === "github") return githubLoad();
-  if (BACKEND === "gdrive") return gdriveLoad();
-  throw new Error(`不明な STORE_BACKEND: ${BACKEND}`);
+function loadJsonIfExists(name) {
+  const p = path.join(__dirname, name);
+  if (!fs.existsSync(p)) return null;
+  return JSON.parse(fs.readFileSync(p, "utf8"));
 }
 
-async function saveStore(store) {
-  const json = JSON.stringify(store);
-  const gz   = await gzip(Buffer.from(json, "utf8"));
-  console.log(`  ストアサイズ: ${(gz.length / 1024 / 1024).toFixed(1)} MB (gzip)`);
-  if (BACKEND === "local")  return localSave(gz);
-  if (BACKEND === "github") return githubSave(gz);
-  if (BACKEND === "gdrive") return gdriveSave(gz);
-  throw new Error(`不明な STORE_BACKEND: ${BACKEND}`);
-}
-
-// --------------------------------------------------------------------------
-// local バックエンド
-// --------------------------------------------------------------------------
-
-function localLoad() {
-  const p = path.join(LOCAL_STORE_DIR, STORE_FILE);
-  if (!fs.existsSync(p)) {
-    console.log("  ローカルストアが存在しません。新規作成します。");
-    return {};
+/** 日本株ユニバースを自動導出する。 */
+export async function resolveJpUniverse(client) {
+  console.log("  上場銘柄一覧を取得中...");
+  const info = await client.listedInfo();
+  const byCode = new Map();
+  for (const r of info) {
+    const code = String(r.Code ?? "").slice(0, 4);
+    if (!code) continue;
+    byCode.set(code, {
+      code,
+      name: r.CompanyName ?? r.CompanyNameEnglish ?? code,
+      sector: r.Sector33CodeName ?? "",
+      market: r.MarketCodeName ?? "",
+      listingDate: r.ListingDate ?? null,
+    });
   }
-  const buf  = fs.readFileSync(p);
-  return gunzip(buf).then((j) => JSON.parse(j.toString("utf8")));
-}
+  console.log(`  上場銘柄: ${byCode.size} 件`);
 
-function localSave(gz) {
-  fs.mkdirSync(LOCAL_STORE_DIR, { recursive: true });
-  fs.writeFileSync(path.join(LOCAL_STORE_DIR, STORE_FILE), gz);
-  console.log(`  ローカルに保存: ${path.join(LOCAL_STORE_DIR, STORE_FILE)}`);
-}
-
-// --------------------------------------------------------------------------
-// GitHub Releases バックエンド（推奨・追加設定不要）
-// --------------------------------------------------------------------------
-
-function ghHeaders() {
-  return {
-    Authorization: `Bearer ${GITHUB_TOKEN}`,
-    Accept: "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-  };
-}
-
-/** リリースを取得。存在しなければ作成して返す */
-async function getOrCreateRelease() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) {
-    throw new Error(
-      "GITHUB_TOKEN または GITHUB_REPOSITORY が未設定です。\n" +
-      "GitHub Actions 上では自動で提供されます。\n" +
-      "ローカルテストの場合は STORE_BACKEND=local を指定してください。"
-    );
-  }
-  const [owner, repo] = GITHUB_REPO.split("/");
-  const getRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/releases/tags/${RELEASE_TAG}`,
-    { headers: ghHeaders() }
-  );
-  if (getRes.ok) return getRes.json();
-  if (getRes.status !== 404) {
-    throw new Error(`GitHub Releases 取得エラー: ${await getRes.text()}`);
-  }
-  // リリースが存在しないので作成する
-  console.log("  GitHub Releases にリリースを新規作成します...");
-  // まずタグを作るためにコミットSHAが必要
-  const refRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/git/ref/heads/main`,
-    { headers: ghHeaders() }
-  );
-  if (!refRes.ok) throw new Error(`ref 取得エラー: ${await refRes.text()}`);
-  const { object: { sha } } = await refRes.json();
-
-  const createRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/releases`,
-    {
-      method: "POST",
-      headers: { ...ghHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tag_name: RELEASE_TAG,
-        target_commitish: sha,
-        name: RELEASE_NAME,
-        body: "自動生成されたバックフィルデータ。削除しないでください。",
-        draft: false,
-        prerelease: true,
-      }),
-    }
-  );
-  if (!createRes.ok) throw new Error(`GitHub Releases 作成エラー: ${await createRes.text()}`);
-  return createRes.json();
-}
-
-async function githubLoad() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) {
-    throw new Error(
-      "GITHUB_TOKEN または GITHUB_REPOSITORY が未設定です。\n" +
-      "ローカルテストの場合は STORE_BACKEND=local を指定してください。"
-    );
-  }
-  const [owner, repo] = GITHUB_REPO.split("/");
-  const getRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/releases/tags/${RELEASE_TAG}`,
-    { headers: ghHeaders() }
-  );
-  if (getRes.status === 404) {
-    console.log("  GitHub Releases にストアが存在しません。新規作成します。");
-    return {};
-  }
-  if (!getRes.ok) throw new Error(`GitHub Releases 取得エラー: ${await getRes.text()}`);
-  const release = await getRes.json();
-  const asset   = release.assets?.find((a) => a.name === STORE_FILE);
-  if (!asset) {
-    console.log("  リリースにストアファイルが存在しません。新規作成します。");
-    return {};
-  }
-  console.log(`  既存ストアを取得: assetId=${asset.id} (${(asset.size / 1024 / 1024).toFixed(1)} MB)`);
-  // プライベートリポジトリ対応: API 経由でダウンロード
-  const dlRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/releases/assets/${asset.id}`,
-    { headers: { ...ghHeaders(), Accept: "application/octet-stream" } }
-  );
-  if (!dlRes.ok) throw new Error(`GitHub アセットダウンロードエラー: ${await dlRes.text()}`);
-  const buf  = Buffer.from(await dlRes.arrayBuffer());
-  const json = await gunzip(buf);
-  return JSON.parse(json.toString("utf8"));
-}
-
-async function githubSave(gzBuffer) {
-  const [owner, repo] = GITHUB_REPO.split("/");
-  const release = await getOrCreateRelease();
-  console.log(`  リリース ID: ${release.id} (${RELEASE_TAG})`);
-
-  // 既存アセットを削除（上書きのため）
-  const existing = release.assets?.find((a) => a.name === STORE_FILE);
-  if (existing) {
-    console.log(`  既存アセットを削除: ${existing.id}`);
-    await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/releases/assets/${existing.id}`,
-      { method: "DELETE", headers: ghHeaders() }
-    );
-  }
-
-  // 新しいアセットをアップロード
-  console.log("  GitHub Releases にアップロード中...");
-  const uploadRes = await fetch(
-    `https://uploads.github.com/repos/${owner}/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(STORE_FILE)}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        "Content-Type": "application/gzip",
-        "Content-Length": String(gzBuffer.length),
-      },
-      body: gzBuffer,
-    }
-  );
-  if (!uploadRes.ok) throw new Error(`GitHub アセットアップロードエラー: ${await uploadRes.text()}`);
-  const asset = await uploadRes.json();
-  console.log(`  GitHub Releases に保存完了: assetId=${asset.id}`);
-}
-
-// --------------------------------------------------------------------------
-// Google Drive バックエンド（サービスアカウントのストレージ制限で非推奨）
-// --------------------------------------------------------------------------
-
-import { createPrivateKey, createSign } from "node:crypto";
-
-function getGdriveConfig() {
-  const raw      = process.env.GDRIVE_SERVICE_ACCOUNT_JSON;
-  const folderId = process.env.GDRIVE_FOLDER_ID?.trim();
-  if (!raw || !folderId) {
-    throw new Error("GDRIVE_SERVICE_ACCOUNT_JSON または GDRIVE_FOLDER_ID が未設定です。");
-  }
-  return { sa: JSON.parse(raw), folderId };
-}
-
-async function getGdriveAccessToken() {
-  const { sa } = getGdriveConfig();
-  const now    = Math.floor(Date.now() / 1000);
-  const header  = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
-  const payload = Buffer.from(JSON.stringify({
-    iss: sa.client_email,
-    scope: "https://www.googleapis.com/auth/drive",
-    aud: "https://oauth2.googleapis.com/token",
-    iat: now, exp: now + 3600,
-  })).toString("base64url");
-  const sigInput = `${header}.${payload}`;
-  const key  = createPrivateKey(sa.private_key);
-  const sign = createSign("SHA256");
-  sign.update(sigInput);
-  const jwt = `${sigInput}.${sign.sign(key).toString("base64url")}`;
-  const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-  });
-  if (!res.ok) throw new Error(`Google OAuth2 エラー: ${await res.text()}`);
-  return (await res.json()).access_token;
-}
-
-async function gdriveLoad() {
-  const { folderId } = getGdriveConfig();
-  const token = await getGdriveAccessToken();
-  const q       = encodeURIComponent(`'${folderId}' in parents and name='${STORE_FILE}' and trashed=false`);
-  const listRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!listRes.ok) throw new Error(`Drive list error: ${await listRes.text()}`);
-  const { files } = await listRes.json();
-  if (!files?.length) { console.log("  GDrive にストアが存在しません。新規作成します。"); return {}; }
-  const dlRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${files[0].id}?alt=media&supportsAllDrives=true`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  if (!dlRes.ok) throw new Error(`Drive download error: ${await dlRes.text()}`);
-  return JSON.parse((await gunzip(Buffer.from(await dlRes.arrayBuffer()))).toString("utf8"));
-}
-
-async function gdriveSave(gzBuffer) {
-  const { folderId } = getGdriveConfig();
-  const token = await getGdriveAccessToken();
-  const q       = encodeURIComponent(`'${folderId}' in parents and name='${STORE_FILE}' and trashed=false`);
-  const listRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`,
-    { headers: { Authorization: `Bearer ${token}` } }
-  );
-  const { files }    = await listRes.json();
-  const existingId   = files?.[0]?.id;
-  const metadata     = JSON.stringify({ name: STORE_FILE, mimeType: "application/gzip", ...(existingId ? {} : { parents: [folderId] }) });
-  const boundary     = "boundary_stockscout";
-  const body         = Buffer.concat([
-    Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n`, "utf8"),
-    Buffer.from(`--${boundary}\r\nContent-Type: application/gzip\r\n\r\n`, "utf8"),
-    gzBuffer,
-    Buffer.from(`\r\n--${boundary}--`, "utf8"),
-  ]);
-  const url    = existingId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart`
-    : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-  const upRes  = await fetch(url, {
-    method: existingId ? "PATCH" : "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
-    body,
-  });
-  if (!upRes.ok) throw new Error(`Drive upload error: ${await upRes.text()}`);
-  console.log(`  Google Drive に保存完了: fileId=${(await upRes.json()).id}`);
-}
-
-// --------------------------------------------------------------------------
-// バックフィル本体
-// --------------------------------------------------------------------------
-
-function today() { return new Date().toISOString().slice(0, 10); }
-
-function loadUniverseList(marketFile, fallback) {
-  const p = path.join(__dirname, marketFile);
-  if (fs.existsSync(p)) { console.log(`  カスタムユニバース ${marketFile} を使用`); return JSON.parse(fs.readFileSync(p, "utf8")); }
-  return fallback;
-}
-
-function getLastDate(entry) {
-  if (!entry?.rows?.length) return null;
-  return entry.rows[entry.rows.length - 1].date;
-}
-
-async function backfillJp(client, store, list) {
-  const to   = today();
-  const from = new Date(Date.now() - 5 * 365 * 86400_000).toISOString().slice(0, 10);
-  let i = 0;
-  for (const [code, name, sector] of list) {
-    i++;
-    const existing  = store[`JP:${code}`];
-    const lastDate  = getLastDate(existing);
-    const fetchFrom = lastDate
-      ? new Date(new Date(lastDate).getTime() + 86400_000).toISOString().slice(0, 10)
-      : from;
-    if (lastDate && fetchFrom >= to) {
-      process.stdout.write(`  [JP ${i}/${list.length}] ${code} → 最新(スキップ)\n`);
-      continue;
-    }
-    process.stdout.write(`  [JP ${i}/${list.length}] ${code} ${name} (${fetchFrom}~${to}) ... `);
+  // 直近営業日の全銘柄出来高から売買代金を推定し、プライム上位を決める
+  console.log("  直近営業日の全銘柄株価を取得(売買代金順位の算出用)...");
+  let quotes = [];
+  for (let back = 1; back <= 7 && quotes.length === 0; back++) {
+    const d = new Date(Date.now() - back * 86400_000).toISOString().slice(0, 10);
     try {
-      const quotes  = await client.dailyQuotesByCode(code, fetchFrom, to);
-      const newRows = quotes
-        .filter((q) => q.AdjustmentClose != null)
-        .map((q) => ({ date: q.Date, o: q.AdjustmentOpen, h: q.AdjustmentHigh, l: q.AdjustmentLow, c: q.AdjustmentClose, v: q.AdjustmentVolume ?? q.Volume ?? 0 }));
-      if (newRows.length === 0) { console.log("0件"); }
-      else if (existing) { existing.rows = existing.rows.concat(newRows); console.log(`${newRows.length}件追加`); }
-      else { store[`JP:${code}`] = { code, name, sector, market: "JP", rows: newRows }; console.log(`${newRows.length}件取得`); }
-    } catch (e) { console.log(`FAIL: ${e.message}`); }
-    await new Promise((r) => setTimeout(r, 150));
+      quotes = await client.dailyQuotesByDate(d);
+      if (quotes.length) console.log(`  ${d} のデータ ${quotes.length} 件を使用`);
+    } catch (e) { /* 休日はデータ無し。翌候補日へ */ }
   }
-}
+  if (!quotes.length) throw new Error("直近営業日の株価が取得できませんでした");
 
-async function backfillUs(store, list) {
-  let i = 0;
-  for (const [ticker, name, sector] of list) {
-    i++;
-    const key      = `US:${ticker}`;
-    const existing = store[key];
-    const lastDate = getLastDate(existing);
-    if (lastDate && lastDate >= today()) { process.stdout.write(`  [US ${i}/${list.length}] ${ticker} → 最新(スキップ)\n`); continue; }
-    process.stdout.write(`  [US ${i}/${list.length}] ${ticker} ${name} ... `);
-    try {
-      const rows = await fetchStooqHistory(ticker);
-      if (existing && lastDate) {
-        const newRows = rows.filter((r) => r.date > lastDate);
-        existing.rows = existing.rows.concat(newRows);
-        console.log(`${newRows.length}件追加`);
-      } else {
-        store[key] = { code: ticker, name, sector, market: "US", rows };
-        console.log(`${rows.length}件取得`);
-      }
-    } catch (e) { console.log(`FAIL: ${e.message}`); }
-    await new Promise((r) => setTimeout(r, 400));
+  const turnover = new Map();
+  for (const q of quotes) {
+    const code = String(q.Code ?? "").slice(0, 4);
+    const tv = Number(q.TurnoverValue) || (Number(q.AdjustmentClose) * Number(q.AdjustmentVolume)) || 0;
+    turnover.set(code, tv);
   }
+
+  const prime = [...byCode.values()].filter((s) => /プライム|Prime/.test(s.market));
+  const growth = [...byCode.values()].filter((s) => /グロース|Growth/.test(s.market));
+  prime.sort((a, b) => (turnover.get(b.code) || 0) - (turnover.get(a.code) || 0));
+
+  const selected = new Map();
+  for (const s of prime.slice(0, PRIME_TOP_N)) selected.set(s.code, s);
+  for (const s of growth) selected.set(s.code, s);
+
+  const manual = loadJsonIfExists("nikkei225-jp.json");
+  if (manual) {
+    let added = 0;
+    for (const code of manual.map(String)) {
+      if (!selected.has(code) && byCode.has(code)) { selected.set(code, byCode.get(code)); added++; }
+    }
+    console.log(`  nikkei225-jp.json から ${added} 銘柄を追加`);
+  }
+  console.log(`  日本株ユニバース確定: ${selected.size} 銘柄(プライム上位${PRIME_TOP_N} + グロース全 + 手動リスト)`);
+  return [...selected.values()];
 }
 
 async function main() {
-  const jqApiKey = process.env.JQUANTS_API_KEY;
-  if (!jqApiKey) { console.error("JQUANTS_API_KEY が未設定です。"); process.exit(1); }
+  const apiKey = process.env.JQUANTS_API_KEY;
+  if (!apiKey) { console.error("JQUANTS_API_KEY が未設定です"); process.exit(1); }
+  const client = new JQuantsClient({ apiKey });
 
-  console.log(`=== StockScout バックフィル開始 (backend: ${BACKEND}) ===`);
-  console.log(`開始時刻: ${new Date().toLocaleString("ja-JP")}`);
-
-  console.log("\n--- ストアの読み込み ---");
+  console.log("=== 既存ストアの確認 ===");
   const store = await loadStore();
-  console.log(`  既存エントリ数: ${Object.keys(store).length}`);
+  const already = Object.keys(store.jp).length + Object.keys(store.us).length;
+  if (already > 0) {
+    console.log(`既に ${already} 銘柄のデータがあります。未取得の銘柄だけを追加取得します(途中失敗からの再開に対応)。`);
+  }
 
-  console.log("\n--- J-Quants 認証 ---");
-  const client = new JQuantsClient({ apiKey: jqApiKey });
-  await client.authenticate();
-  console.log("  OK");
+  console.log("\n=== 日本株ユニバースの自動導出 ===");
+  const jpUniverse = await resolveJpUniverse(client);
 
-  const jpList = loadUniverseList("universe-jp.json", JP_NAMES);
-  const usList = loadUniverseList("universe-us.json", US_NAMES);
-  console.log(`\nユニバース: 日本株 ${jpList.length} 銘柄, 米国株 ${usList.length} 銘柄`);
+  console.log("\n=== 日本株 5年分の取得 ===");
+  let i = 0, ok = 0, skip = 0, fail = 0;
+  for (const s of jpUniverse) {
+    i++;
+    if (store.jp[s.code]?.bars?.length > 200) { skip++; continue; } // 再開対応
+    process.stdout.write(`  [${i}/${jpUniverse.length}] ${s.code} ${s.name} ... `);
+    try {
+      const [quotes, stmts] = await Promise.all([
+        client.dailyQuotesByCode(s.code, FIVE_YEARS_AGO, TODAY),
+        client.statements(s.code),
+      ]);
+      const entry = store.jp[s.code] ||= { name: s.name, sector: s.sector, listingDate: s.listingDate, marketCodeName: s.market };
+      appendBars(entry, quotes.map(quoteToBar));
+      appendStmts(entry, stmts);
+      ok++;
+      console.log(`OK (${entry.bars.length}日 / 開示${entry.stmts.length}件)`);
+    } catch (e) {
+      fail++;
+      console.log(`FAIL: ${e.message.slice(0, 120)}`);
+    }
+    await new Promise((r) => setTimeout(r, 150));
+    // 100銘柄ごとに途中保存(長時間ジョブの中断・失敗に備える)
+    if (i % 100 === 0) { console.log("  --- 途中保存 ---"); await saveStore(store); }
+  }
+  console.log(`日本株: 取得${ok} / スキップ(取得済)${skip} / 失敗${fail}`);
 
-  console.log("\n=== 日本株バックフィル ===");
-  await backfillJp(client, store, jpList);
+  console.log("\n=== 米国株(S&P500) 5年分の取得 ===");
+  const usList = loadJsonIfExists("universe-sp500.json") || [];
+  if (!usList.length) console.warn("  [警告] universe-sp500.json が見つかりません。米国株をスキップします。");
+  i = 0; ok = 0; skip = 0; fail = 0;
+  const cutoff = FIVE_YEARS_AGO;
+  for (const [ticker, name, sector] of usList) {
+    i++;
+    if (store.us[ticker]?.bars?.length > 200) { skip++; continue; }
+    process.stdout.write(`  [${i}/${usList.length}] ${ticker} ${name} ... `);
+    try {
+      const hist = await fetchStooqHistory(ticker);
+      const entry = store.us[ticker] ||= { name, sector };
+      appendBars(entry, hist.filter((r) => r.date >= cutoff).map(stooqToBar));
+      ok++;
+      console.log(`OK (${entry.bars.length}日)`);
+    } catch (e) {
+      fail++;
+      console.log(`FAIL: ${e.message.slice(0, 120)}`);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    if (i % 100 === 0) { console.log("  --- 途中保存 ---"); await saveStore(store); }
+  }
+  console.log(`米国株: 取得${ok} / スキップ${skip} / 失敗${fail}`);
 
-  console.log("\n=== 米国株バックフィル ===");
-  await backfillUs(store, usList);
-
-  console.log("\n--- ストアの保存 ---");
+  console.log("\n=== 最終保存 ===");
   await saveStore(store);
-
-  console.log(`\n=== 完了 ===`);
-  console.log(`合計 ${Object.keys(store).length} 銘柄を保存しました。`);
-  console.log(`終了時刻: ${new Date().toLocaleString("ja-JP")}`);
+  console.log("\nバックフィル完了。次は daily-update.mjs が毎日この続きを積み重ねます。");
 }
 
 const isMain = import.meta.url === `file://${process.argv[1]}`;
-if (isMain) {
-  main().catch((e) => { console.error("バックフィルが異常終了しました:", e); process.exit(1); });
-}
-
-export { main, loadStore, saveStore };
+if (isMain) main().catch((e) => { console.error("バックフィル異常終了:", e); process.exit(1); });
+export { main };
