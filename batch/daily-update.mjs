@@ -9,8 +9,8 @@
  *   3. 日本株の財務情報: その日に開示があった分だけを日付指定で取得して追記
  *   4. 米国株: Stooq から日付範囲指定で不足分だけ取得(1銘柄1リクエストだが
  *      数日分の小さなCSVなので軽い)
- *   5. ストアを保存
- *   6. build-outputs.mjs を呼んで snapshot.json / backtest.json を再計算
+ *   5. build-outputs.mjs を呼んで表示JSONとフォワードテスト状態を更新
+ *   6. 価格とフォワードテスト状態をまとめてストアへ保存
  *
  * データは削除しない(追記のみ)。ウィンドウは「5年+経過日数」と伸び続ける。
  */
@@ -133,14 +133,13 @@ async function main() {
   }
   console.log(`  米国株: 更新${usOk} / 失敗${usFail}`);
 
-  console.log("\n=== 5. ストア保存 ===");
-  /* 「今日の日付」ではなく、実際にデータを確認できた最終日を明示的に渡す。
-     もし本日分がまだ配信されていなければ lastConfirmedDate は前回のままなので、
-     次回の実行が正しく本日分から再取得できる。 */
-  await saveStore(store, lastConfirmedDate);
-
-  console.log("\n=== 6. 出力の再計算(snapshot.json / backtest.json) ===");
+  console.log("\n=== 5. 出力の再計算(snapshot.json / backtest.json) ===");
   await buildOutputs(store);
+
+  /* buildOutputs はフォワードテスト状態も更新するため、その後で永続化する。
+     「今日」ではなく、実データを確認できた最終日を updatedAt にする。 */
+  console.log("\n=== 6. ストア保存 ===");
+  await saveStore(store, lastConfirmedDate);
 
   console.log("\n日次更新 完了。");
 }

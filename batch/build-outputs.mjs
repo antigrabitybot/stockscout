@@ -24,6 +24,7 @@ import { buildStockEntry } from "./compute-features-jp.mjs";
 import { buildUsStockEntry } from "./compute-features-us.mjs";
 import { fetchGasFundamentals } from "./compute-features-us.mjs";
 import { barToQuote, barToOhlc, loadStore } from "./store.mjs";
+import { updateForwardTests } from "./forward-test.mjs";
 import {
   STRATEGIES, runScreen, evaluateHolding, featuresAt, backtest, benchmark,
   TECH_CURRENT_KEYS, CAT,
@@ -34,6 +35,7 @@ const ROOT = path.join(__dirname, "..");
 const OUT_DIR = path.join(ROOT, "public", "data");
 const DASH_HISTORY_DAYS = 260; // トレンドマークの200日線判定+余裕分。チャート表示は90日
 const BT_PERIODS = [1, 3, 5]; // 年。加えて 'all'(全期間) を自動計算
+const MIN_BT_STOCKS = 30; // 上場直後の少数銘柄に市場全体の検証期間を潰させない
 
 /* ------------------------------------------------- ストア → universe 変換 */
 
@@ -185,6 +187,15 @@ function computePortfolioSignals(universe) {
   return out;
 }
 
+function latestDataDate(universe) {
+  let latest = null;
+  for (const stock of universe) {
+    const date = stock.history?.[stock.history.length - 1]?.date;
+    if (date && (!latest || date > latest)) latest = date;
+  }
+  return latest;
+}
+
 /** 軽量版: 各銘柄の履歴を直近 N 日に切り詰め、fundDaily(バックテスト専用)は削る。
  *  さらに履歴を「キー付きオブジェクトの配列」から「数値だけの配列の配列」
  *  [[o,h,l,c,v], ...] に変換し、価格は小数1桁・出来高は整数に丸める。
@@ -218,18 +229,33 @@ export function computeBacktests(universe) {
   for (const market of ["JP", "US"]) {
     const pool = universe.filter((s) => s.market === market);
     if (pool.length < 5) continue;
-    const maxYears = Math.floor((Math.min(...pool.map((s) => s.history.length)) - 270) / 252 * 10) / 10;
+    // 最短履歴を使うと、新規上場が1銘柄混じるだけで全期間が0年になる。
+    // 少なくとも MIN_BT_STOCKS 銘柄で検証できる長さを市場の上限とする。
+    const lengths = pool.map((s) => s.history.length).sort((a, b) => b - a);
+    const eligibleFloor = lengths[Math.min(MIN_BT_STOCKS, lengths.length) - 1];
+    const maxYears = Math.floor((eligibleFloor - 261) / 252 * 10) / 10;
     const periods = [...BT_PERIODS.filter((y) => y <= maxYears), maxYears].filter((v, i, a) => v > 0.3 && a.indexOf(v) === i);
     result.markets[market] = { maxYears, periods: {} };
     for (const years of periods) {
       const label = years === maxYears ? "all" : String(years);
+      const requiredLength = 261 + Math.round(years * 252);
+      const eligible = pool.filter((s) => s.history.length >= requiredLength);
+      if (eligible.length < Math.min(MIN_BT_STOCKS, pool.length)) continue;
+      // backtest() は全銘柄を同じ配列添字で進めるため、末尾の長さも揃える。
+      const aligned = eligible.map((s) => {
+        const offset = s.history.length - requiredLength;
+        const fundDaily = s.fundDaily
+          ? Object.fromEntries(Object.entries(s.fundDaily).map(([k, values]) => [k, values.slice(offset)]))
+          : s.fundDaily;
+        return { ...s, history: s.history.slice(offset), fundDaily };
+      });
       console.log(`  [backtest] ${market} ${label === "all" ? "全期間" : years + "年"} を計算中...`);
       const t0 = Date.now();
-      const bm = benchmark(universe, market, years);
+      const bm = benchmark(aligned, market, years);
       const rows = [];
       for (const st of STRATEGIES) {
         if (!st.markets.includes(market)) continue;
-        const bt = backtest(universe, market, st, years);
+        const bt = backtest(aligned, market, st, years);
         if (!bt) continue;
         rows.push({
           stId: st.id, name: st.name, cat: st.cat,
@@ -243,7 +269,7 @@ export function computeBacktests(universe) {
       rows.sort((a, b) => b.cagr - a.cagr);
       rows.forEach((r, i) => { if (i < 5) r.curve = downsampleCurve(r._rawCurve); delete r._rawCurve; });
       result.markets[market].periods[label] = {
-        years,
+        years, stockCount: aligned.length,
         bm: { final: Math.round(bm.final), cagr: bm.cagr, maxDD: bm.maxDD, curve: downsampleCurve(bm.curve) },
         rows,
       };
@@ -288,15 +314,18 @@ export async function buildOutputs(store) {
   const strong = computeStrong(universe);
   const portfolio_signals = computePortfolioSignals(universe);
 
+  console.log("  フォワードテストを更新中...");
+  const forwardTests = updateForwardTests(store, universe);
+
   console.log("  バックテストを事前計算中(数分かかります)...");
   const backtests = computeBacktests(universe);
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const snapshot = {
-    asof: store.updatedAt || new Date().toISOString().slice(0, 10),
+    asof: latestDataDate(universe) || store.updatedAt || new Date().toISOString().slice(0, 10),
     regime: computeRegime(universe),
     universe: trimForDashboard(universe),
-    strong, portfolio_signals,
+    strong, portfolio_signals, forwardTest: forwardTests,
   };
   fs.writeFileSync(path.join(OUT_DIR, "snapshot.json"), JSON.stringify(snapshot));
   fs.writeFileSync(path.join(OUT_DIR, "backtest.json"), JSON.stringify(backtests));
@@ -306,7 +335,7 @@ export async function buildOutputs(store) {
   if (s1 > 25) {
     console.warn("  [警告] snapshot.json が25MBを超えています。DASH_HISTORY_DAYS の削減か銘柄数の見直しを検討してください。");
   }
-  return { snapshot, backtests };
+  return { snapshot, backtests, forwardTests };
 }
 
 /* 単体実行用エントリポイント。`node batch/build-outputs.mjs` で

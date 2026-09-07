@@ -1397,6 +1397,7 @@ const DATA_SOURCE = {
     } catch (e) { /* 未接続 */ }
     return null;
   },
+
 };
 
 /* ============================================================ シグナル生成
@@ -2366,6 +2367,7 @@ export default function StockScout() {
   useEffect(() => { DATA_SOURCE.load().then(setSnap); }, []);
 
   const signals = useMemo(() => (snap ? runScreen(snap.universe, market) : {}), [snap, market]);
+  const forwardData = snap?.forwardTest;
 
   /* 通知は銘柄単位に集約する。同じ銘柄が手法の数だけ並ぶのは通知ではなく騒音 */
   const strongList = useMemo(() => {
@@ -2919,8 +2921,12 @@ export default function StockScout() {
               このアプリの心臓部です。全手法に同じ土俵で推薦を出させ、その後を機械的に追跡します。ここに十分な件数が溜まるまで、成績は運と区別できません。
             </p>
             <div className="warn">
-              <b>まだ計測が始まっていません</b> — フォワードテストは、バッチが毎営業日シグナルを記録し始めた時点からカウントされます。
-              各手法が 100 件程度に達するまで、この画面の数値で判断してはいけません。20件の勝率60%は、コイン投げと区別がつきません。
+              {forwardData?.markets ? (
+                <><b>{forwardData.startedAt} から計測中</b> — シグナルは翌営業日の始値で約定し、決済まで日次追跡します。
+                  各手法が 100 件程度に達するまで、この画面の数値で判断してはいけません。20件の勝率60%は、コイン投げと区別がつきません。</>
+              ) : (
+                <><b>蓄積データがまだありません</b> — 次回の日次バッチから計測を開始します。</>
+              )}
             </div>
             <div className="tscroll">
               <table className="tbl">
@@ -2930,20 +2936,22 @@ export default function StockScout() {
                   </tr>
                 </thead>
                 <tbody>
-                  {STRATEGIES.filter((st) => st.markets.includes(market)).map((st) => (
-                    <tr key={st.id} style={{ cursor: "pointer" }} onClick={() => setModal({ type: "strategy", st })}>
+                  {STRATEGIES.filter((st) => st.markets.includes(market)).map((st) => {
+                    const perf = forwardData?.markets?.[market]?.strategies?.[st.id];
+                    const tracking = (perf?.activeCount || 0) + (perf?.pendingCount || 0);
+                    return <tr key={st.id} style={{ cursor: "pointer" }} onClick={() => setModal({ type: "strategy", st })}>
                       <td>
                         <span className="tag" style={{ background: CAT[st.cat].color, marginRight: 6 }}>{CAT[st.cat].label}</span>
                         {st.name}
                       </td>
                       <td className="mono">{(signals[st.id] || []).length}</td>
-                      <td className="mono" style={{ color: "var(--grey-l)" }}>0</td>
-                      <td className="mono" style={{ color: "var(--grey-l)" }}>—</td>
-                      <td className="mono" style={{ color: "var(--grey-l)" }}>—</td>
-                      <td className="mono" style={{ color: "var(--grey-l)" }}>—</td>
-                      <td className="mono" style={{ color: "var(--grey-l)" }}>—</td>
+                      <td className="mono">{perf ? <>{perf.closedCount}<small style={{ display: "block", color: "var(--grey-l)" }}>追跡中 {tracking}</small></> : "—"}</td>
+                      <td className="mono">{perf?.winRate != null ? pct(perf.winRate) : "—"}</td>
+                      <td className="mono">{perf?.avgR != null ? `${perf.avgR.toFixed(2)}R` : "—"}</td>
+                      <td className="mono">{perf?.pfInfinite ? "∞" : perf?.pf != null && perf.closedCount ? perf.pf.toFixed(2) : "—"}</td>
+                      <td className="mono">{perf?.closedCount ? pct(perf.maxDD) : "—"}</td>
                     </tr>
-                  ))}
+                  })}
                 </tbody>
               </table>
             </div>
