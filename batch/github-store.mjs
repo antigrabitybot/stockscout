@@ -36,6 +36,27 @@
 const API = "https://api.github.com";
 const TAG = "store-data";
 
+/** 長い計算後に keep-alive 接続が切れて EPIPE になる場合へ対応する。
+ * GET/DELETE は冪等なので、ネットワーク例外と一時的な5xx/429だけを再試行する。 */
+export async function fetchWithRetry(url, init = {}, options = {}) {
+  const attempts = options.attempts ?? 4;
+  const delayMs = options.delayMs ?? 500;
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await fetchImpl(url, init);
+      if (res.status !== 429 && res.status < 500) return res;
+      lastError = new Error(`一時的なHTTPエラー ${res.status}`);
+      await res.arrayBuffer().catch(() => {});
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs * 2 ** (attempt - 1)));
+  }
+  throw lastError;
+}
+
 function repoInfo() {
   const repo = process.env.GITHUB_REPOSITORY;
   if (!repo) throw new Error("GITHUB_REPOSITORY が未設定です(GitHub Actions外で実行していませんか?)");
@@ -64,7 +85,7 @@ export class GitHubStore {
   /** 固定タグのリリースを取得。無ければ作成して返す。 */
   async _ensureRelease() {
     const base = `${API}/repos/${this.owner}/${this.repo}`;
-    let res = await fetch(`${base}/releases/tags/${TAG}`, { headers: this._headers() });
+    let res = await fetchWithRetry(`${base}/releases/tags/${TAG}`, { headers: this._headers() });
     if (res.status === 404) {
       res = await fetch(`${base}/releases`, {
         method: "POST",
@@ -87,7 +108,7 @@ export class GitHubStore {
     const release = await this._ensureRelease();
     const asset = (release.assets || []).find((a) => a.name === name);
     if (!asset) return null;
-    const res = await fetch(`${API}/repos/${this.owner}/${this.repo}/releases/assets/${asset.id}`, {
+    const res = await fetchWithRetry(`${API}/repos/${this.owner}/${this.repo}/releases/assets/${asset.id}`, {
       headers: this._headers({ Accept: "application/octet-stream" }),
     });
     if (!res.ok) throw new Error(`アセットダウンロード失敗(HTTP ${res.status})`);
@@ -99,7 +120,7 @@ export class GitHubStore {
     const release = await this._ensureRelease();
     const existing = (release.assets || []).find((a) => a.name === name);
     if (existing) {
-      const delRes = await fetch(`${API}/repos/${this.owner}/${this.repo}/releases/assets/${existing.id}`, {
+      const delRes = await fetchWithRetry(`${API}/repos/${this.owner}/${this.repo}/releases/assets/${existing.id}`, {
         method: "DELETE", headers: this._headers(),
       });
       if (!delRes.ok && delRes.status !== 404) {
