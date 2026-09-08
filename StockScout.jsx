@@ -2006,6 +2006,11 @@ const css = `
 .tbl td{padding:8px 9px;border-bottom:1px solid var(--line2);text-align:right;white-space:nowrap;}
 .tbl tr:hover td{background:#FAFBF8;}
 .tscroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;}
+.perfgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px;margin:0 0 12px;}
+.perfkpi{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px;}
+.perfkpi .k{font-size:10px;color:var(--grey-l);}.perfkpi .v{font-size:18px;font-weight:800;margin-top:3px;}
+.perfsection{font-size:14px;margin:20px 0 8px;}.statusopen{color:var(--up);font-weight:700}.statuspending{color:var(--grey)}
+.spark{width:92px;height:28px;display:block;margin-left:auto;}
 
 /* ---- misc ---- */
 .warn{background:#FFF8E6;border:1px solid #E8D9A0;border-radius:7px;padding:10px 12px;font-size:11.5px;
@@ -2169,6 +2174,14 @@ function RRail({ cur, mae, mfe }) {
 }
 
 /* ------------------------------------------------------- エクイティカーブ */
+function Sparkline({ values = [] }) {
+  if (values.length < 2) return <span style={{ color: "var(--grey-l)" }}>—</span>;
+  const w = 92, h = 28, lo = Math.min(...values, 0), hi = Math.max(...values, 0), range = hi - lo || 1;
+  const pts = values.map((v, i) => `${i * w / (values.length - 1)},${h - (v - lo) / range * h}`).join(" ");
+  const zero = h - (0 - lo) / range * h;
+  return <svg className="spark" viewBox={`0 0 ${w} ${h}`} aria-label="推移"><line x1="0" x2={w} y1={zero} y2={zero} stroke="#DDE1D9" /><polyline points={pts} fill="none" stroke={values.at(-1) >= 0 ? "#2E6E62" : "#A63A28"} strokeWidth="2" /></svg>;
+}
+
 function EquityChart({ rows, bm }) {
   const W = 640, H = 210, L = 46, B = 20;
   const all = [bm.curve, ...rows.map((r) => r.bt.curve)];
@@ -2918,47 +2931,47 @@ export default function StockScout() {
           <>
             <h1 className="h1">手法比較</h1>
             <p className="sub">
-              このアプリの心臓部です。全手法に同じ土俵で推薦を出させ、その後を機械的に追跡します。ここに十分な件数が溜まるまで、成績は運と区別できません。
+              「銘柄選びの質」と「実際の売買成績」を分けて比較します。前者は同じ観測日数、後者は全手法に同じ100万円を渡すため、保有期間が違っても土俵が揃います。
             </p>
             <div className="warn">
               {forwardData?.markets ? (
-                <><b>{forwardData.startedAt} から計測中</b> — シグナルは翌営業日の始値で約定し、決済まで日次追跡します。
-                  各手法が 100 件程度に達するまで、この画面の数値で判断してはいけません。20件の勝率60%は、コイン投げと区別がつきません。</>
+                <><b>{forwardData.startedAt} から計測中</b> — 推薦は5・20・60・120営業日後に市場平均との超過収益を採点します。
+                  仮想口座は翌営業日始値、初期100万円、1回1%リスク、最大5銘柄、往復コスト0.2%です。各観測窓が100件程度に達するまでは暫定値です。</>
               ) : (
                 <><b>蓄積データがまだありません</b> — 次回の日次バッチから計測を開始します。</>
               )}
             </div>
+            <h2 className="perfsection">1. 銘柄選びの質（固定観測期間）</h2>
+            <p className="sub">数値は各日数後の市場平均に対する平均超過収益です。括弧内は評価済みシグナル数。早く利確する手法も長期保有手法も、ここでは同じ日数で比較します。</p>
             <div className="tscroll">
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th>手法</th><th>本日</th><th>件数</th><th>勝率</th><th>平均R</th><th>PF</th><th>最大DD</th>
+                    <th>手法</th><th>全シグナル</th><th>5日</th><th>20日</th><th>60日</th><th>120日</th><th>MFE / MAE</th>
                   </tr>
                 </thead>
                 <tbody>
                   {STRATEGIES.filter((st) => st.markets.includes(market)).map((st) => {
                     const perf = forwardData?.markets?.[market]?.strategies?.[st.id];
-                    const tracking = (perf?.activeCount || 0) + (perf?.pendingCount || 0);
-                    return <tr key={st.id} style={{ cursor: "pointer" }} onClick={() => setModal({ type: "strategy", st })}>
+                    const q = perf?.signalQuality;
+                    return <tr key={st.id} style={{ cursor: "pointer" }} onClick={() => setModal({ type: "forward", st, perf })}>
                       <td>
                         <span className="tag" style={{ background: CAT[st.cat].color, marginRight: 6 }}>{CAT[st.cat].label}</span>
                         {st.name}
                       </td>
-                      <td className="mono">{(signals[st.id] || []).length}</td>
-                      <td className="mono">{perf ? <>{perf.closedCount}<small style={{ display: "block", color: "var(--grey-l)" }}>追跡中 {tracking}</small></> : "—"}</td>
-                      <td className="mono">{perf?.winRate != null ? pct(perf.winRate) : "—"}</td>
-                      <td className="mono">{perf?.avgR != null ? `${perf.avgR.toFixed(2)}R` : "—"}</td>
-                      <td className="mono">{perf?.pfInfinite ? "∞" : perf?.pf != null && perf.closedCount ? perf.pf.toFixed(2) : "—"}</td>
-                      <td className="mono">{perf?.closedCount ? pct(perf.maxDD) : "—"}</td>
+                      <td className="mono">{q?.totalSignals ?? "—"}</td>
+                      {[5,20,60,120].map(n => <td className="mono" key={n}>{q?.checkpoints?.[n]?.avgExcess != null ? <>{pct(q.checkpoints[n].avgExcess)}<small style={{display:"block",color:"var(--grey-l)"}}>n={q.checkpoints[n].count}</small></> : "—"}</td>)}
+                      <td className="mono">{q?.avgMfe != null ? `${pct(q.avgMfe)} / ${pct(q.avgMae)}` : "—"}</td>
                     </tr>
                   })}
                 </tbody>
               </table>
             </div>
-            <p className="sub" style={{ marginTop: 13 }}>
-              モードB（J-Quants の12週遅延データを使い、12週前を「現在」と見立てて疑似的に日を進める）を回すと、
-              この表は数時間で埋まります。手法の絞り込みは、実運用より先にそこで済ませるのが合理的です。
-            </p>
+            <h2 className="perfsection">2. 同額口座の運用成績</h2>
+            <p className="sub">各手法は独立した100万円口座です。現金不足なら買わず、最大5銘柄まで。利益を再投資するため、無限に資産がある設定ではありません。</p>
+            <div className="tscroll"><table className="tbl"><thead><tr><th>手法</th><th>評価額</th><th>累積</th><th>CAGR</th><th>最大DD</th><th>Sharpe</th><th>保有 / 決済</th></tr></thead><tbody>
+              {STRATEGIES.filter(st=>st.markets.includes(market)).map(st=>{const perf=forwardData?.markets?.[market]?.strategies?.[st.id],p=perf?.portfolio;return <tr key={st.id} style={{cursor:"pointer"}} onClick={()=>setModal({type:"forward",st,perf})}><td><span className="tag" style={{background:CAT[st.cat].color,marginRight:6}}>{CAT[st.cat].label}</span>{st.name}</td><td className="mono">{p?.equity!=null?`¥${Math.round(p.equity).toLocaleString()}`:"—"}</td><td className="mono">{p?.totalReturn!=null?pct(p.totalReturn):"—"}</td><td className="mono">{p?.cagr!=null?pct(p.cagr):"—"}</td><td className="mono">{p?.maxDD!=null?pct(p.maxDD):"—"}</td><td className="mono">{p?.sharpe!=null?p.sharpe.toFixed(2):"—"}</td><td className="mono">{p?`${p.activeCount} / ${p.closedCount}`:"—"}</td></tr>})}
+            </tbody></table></div>
           </>
         )}
 
@@ -3333,6 +3346,26 @@ export default function StockScout() {
                 </div>
               </>
             )}
+
+            {modal.type === "forward" && (() => {
+              const p = modal.perf?.portfolio, q = modal.perf?.signalQuality;
+              const rows = [...(p?.tracked || []), ...(p?.recentClosed || [])];
+              return <>
+                <span className="tag" style={{ background: CAT[modal.st.cat].color }}>{CAT[modal.st.cat].label}</span>
+                <h2>{modal.st.name} — 追跡状況</h2>
+                <div className="eyebrow">{HORIZON[modal.st.horizon]} ・ {market === "JP" ? "日本株" : "米国株"}</div>
+                <div className="perfgrid" style={{marginTop:14}}>
+                  <div className="perfkpi"><div className="k">口座評価額</div><div className="v mono">{p?.equity!=null?`¥${Math.round(p.equity).toLocaleString()}`:"—"}</div></div>
+                  <div className="perfkpi"><div className="k">累積リターン</div><div className="v mono">{p?.totalReturn!=null?pct(p.totalReturn):"—"}</div></div>
+                  <div className="perfkpi"><div className="k">現金</div><div className="v mono">{p?.cash!=null?`¥${Math.round(p.cash).toLocaleString()}`:"—"}</div></div>
+                  <div className="perfkpi"><div className="k">シグナル数</div><div className="v mono">{q?.totalSignals??0}</div></div>
+                </div>
+                <div className="act"><b>ルール</b> — 推薦翌日の始値で仮想約定。1回の最大損失を口座の1%、同時保有5銘柄以内に調整し、現金が足りなければ見送ります。</div>
+                <h3 className="perfsection">追跡中・最近の決済</h3>
+                {rows.length ? <div className="tscroll"><table className="tbl"><thead><tr><th>銘柄</th><th>状態</th><th>推薦 / 約定</th><th>現在 / 決済</th><th>損益</th><th>R</th><th>経過</th><th>MFE / MAE</th><th>推移</th></tr></thead><tbody>{rows.map((x,i)=><tr key={`${x.status}-${x.code}-${x.signalDate}-${i}`}><td><b>{x.name}</b><small className="mono" style={{display:"block",color:"var(--grey-l)"}}>{x.code}</small></td><td className={x.status==="open"?"statusopen":"statuspending"}>{x.status==="open"?"保有中":x.status==="pending"?"翌日注文":"決済済"}{x.reason?<small style={{display:"block"}}>{x.reason}</small>:null}</td><td className="mono">{x.signalDate}<small style={{display:"block",color:"var(--grey-l)"}}>{x.entryDate||"未約定"}</small></td><td className="mono">{x.status==="pending"?"—":fmtP(x.exit??x.last??x.entry,market)}{x.entry?<small style={{display:"block",color:"var(--grey-l)"}}>買 {fmtP(x.entry,market)}</small>:null}</td><td className="mono">{x.status==="closed"?pct((x.exit-x.entry)/x.entry):x.returnPct!=null?pct(x.returnPct):"—"}</td><td className="mono">{x.r!=null?`${x.r.toFixed(2)}R`:x.currentR!=null?`${x.currentR.toFixed(2)}R`:"—"}</td><td className="mono">{x.days!=null?`${x.days}日`:"—"}</td><td className="mono">{x.mfe!=null?`${pct(x.mfe)} / ${pct(x.mae)}`:"—"}</td><td><Sparkline values={x.path}/></td></tr>)}</tbody></table></div>:<p className="sub">追跡銘柄はまだありません。次の日次更新で推薦が出ると追加されます。</p>}
+                <button className="gbtn" onClick={()=>setModal({type:"strategy",st:modal.st})}>手法のルールを見る</button>
+              </>;
+            })()}
 
             {modal.type === "stock" && (
               <>

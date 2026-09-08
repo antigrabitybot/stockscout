@@ -1,182 +1,56 @@
-/**
- * 日次フォワードテスト。
- *
- * シグナル日の終値を見て候補を記録し、翌営業日の始値で約定する。
- * 同じ手法・銘柄の未決済レコードは重複作成しない。状態は価格ストア内に
- * 保存し、公開JSONには集計値だけを出す。
- */
+/** Forward test: fixed-horizon signal quality + capital-constrained paper account. */
 import { STRATEGIES, plan, featuresAt, BT } from "../logic.mjs";
-
-const VERSION = 1;
-
-function emptyStats() {
-  return {
-    closedCount: 0, wins: 0, sumR: 0, grossProfitR: 0, grossLossR: 0,
-    equity: 1, peak: 1, maxDD: 0,
-  };
+const VERSION=2, CHECKPOINTS=[5,20,60,120], LIMIT=40;
+const emptyPortfolio=(startedAt=null)=>({startedAt,initialCapital:BT.capital,cash:BT.capital,pending:[],open:[],closed:[],equityCurve:[],peak:BT.capital,maxDD:0});
+function barOn(s,date){const index=s.history.findIndex(x=>x.date===date);return index<0?null:{bar:s.history[index],index};}
+function strategyState(state,market,id){
+  state.markets||={}; state.markets[market]||={lastProcessedAt:null,benchmark:{value:1,lastDate:null},strategies:{}};
+  return state.markets[market].strategies[id]||=( {signals:[],portfolio:emptyPortfolio()} );
 }
-
-function strategyState(state, market, stId) {
-  state.markets ||= {};
-  state.markets[market] ||= { lastProcessedAt: null, strategies: {} };
-  return state.markets[market].strategies[stId] ||= {
-    pending: [], open: [], stats: emptyStats(),
-  };
-}
-
-function barOn(stock, date) {
-  const i = stock.history.findIndex((bar) => bar.date === date);
-  return i < 0 ? null : { bar: stock.history[i], index: i };
-}
-
-function closePosition(ss, position, px, date, reason) {
-  const pnlPerShare = px - position.entry - position.entry * BT.cost;
-  const r = pnlPerShare / position.initialR;
-  const stats = ss.stats ||= emptyStats();
-  stats.closedCount++;
-  stats.sumR += r;
-  if (r > 0) { stats.wins++; stats.grossProfitR += r; }
-  else stats.grossLossR += Math.abs(r);
-  stats.equity *= Math.max(0.01, 1 + BT.riskPct * r);
-  stats.peak = Math.max(stats.peak, stats.equity);
-  stats.maxDD = Math.min(stats.maxDD, stats.equity / stats.peak - 1);
-  ss.recentClosed ||= [];
-  ss.recentClosed.push({
-    code: position.code, name: position.name, signalDate: position.signalDate,
-    entryDate: position.entryDate, exitDate: date, entry: position.entry,
-    exit: px, r, days: position.days, reason,
-  });
-  if (ss.recentClosed.length > 30) ss.recentClosed.splice(0, ss.recentClosed.length - 30);
-}
-
-/** 1市場・1営業日を進める。テストからも直接呼べる純粋な日次処理。 */
-export function advanceForwardTestDay(state, market, date, stocks, strategies = STRATEGIES) {
-  const byCode = new Map(stocks.map((s) => [s.code, s]));
-
-  for (const st of strategies.filter((s) => s.markets.includes(market))) {
-    const ss = strategyState(state, market, st.id);
-
-    // 前営業日に確定した候補を、当日の始値で約定する。
-    const stillPending = [];
-    for (const pending of ss.pending) {
-      const stock = byCode.get(pending.code);
-      const found = stock && barOn(stock, date);
-      if (!found) { stillPending.push(pending); continue; }
-      const entry = found.bar.o;
-      const p = plan({ ...stock, price: entry }, st);
-      const initialR = entry - p.stop;
-      if (!(entry > 0 && initialR > 0)) continue;
-      ss.open.push({
-        code: stock.code, name: stock.name, signalDate: pending.signalDate,
-        entryDate: date, entry, stop: p.stop, target: p.target,
-        initialR, days: 0,
-      });
+function migrate(state){
+  if(state.version===VERSION)return;
+  if(state.version!==1)throw new Error(`未対応の forwardTest version: ${state.version}`);
+  for(const ms of Object.values(state.markets||{})){
+    ms.benchmark||={value:1,lastDate:ms.lastProcessedAt||null};
+    for(const ss of Object.values(ms.strategies||{})){
+      const pending=ss.pending||[],open=ss.open||[],closed=ss.recentClosed||[];
+      ss.signals=[...pending,...open,...closed].map(x=>({code:x.code,name:x.name,signalDate:x.signalDate,signalClose:x.entry||null,benchmarkEntry:ms.benchmark.value,latestDate:x.exitDate||x.entryDate||x.signalDate,latest:x.exit||x.entry||null,checkpoints:{},mfe:0,mae:0,migrated:true}));
+      ss.legacy={pending,open,stats:ss.stats,recentClosed:closed};
+      ss.portfolio=emptyPortfolio(ms.lastProcessedAt||state.startedAt);
+      delete ss.pending;delete ss.open;delete ss.stats;delete ss.recentClosed;
     }
-    ss.pending = stillPending;
-
-    // 当日の値動きで、保有中レコードの損切り・利確・トレンド転換を判定する。
-    const survivors = [];
-    for (const position of ss.open) {
-      const stock = byCode.get(position.code);
-      const found = stock && barOn(stock, date);
-      if (!found) { survivors.push(position); continue; }
-      const { bar, index } = found;
-      position.days++;
-      let exit = null;
-      let px = null;
-      if (bar.l <= position.stop) {
-        exit = "損切り";
-        px = Math.min(position.stop, bar.o);
-      } else if (bar.h >= position.target) {
-        exit = "利確";
-        px = position.target;
-      } else {
-        const trailN = st.horizon === "swing" ? 10 : st.horizon === "mid" ? 50 : 200;
-        if (position.days > trailN && index + 1 >= trailN) {
-          const window = stock.history.slice(index - trailN + 1, index + 1);
-          const movingAverage = window.reduce((sum, x) => sum + x.c, 0) / window.length;
-          if (bar.c < movingAverage) { exit = "トレンド転換"; px = bar.c; }
-        }
-        if (!exit && bar.c > position.entry + position.initialR && position.stop < position.entry) {
-          position.stop = position.entry;
-        }
-      }
-      if (exit) closePosition(ss, position, px, date, exit);
-      else survivors.push(position);
-    }
-    ss.open = survivors;
-
-    // 当日終値時点の推薦を記録。翌営業日まで価格は確定させない。
-    const activeCodes = new Set([...ss.open, ...ss.pending].map((x) => x.code));
-    const candidates = [];
-    for (const stock of stocks) {
-      if (stock.market !== market || activeCodes.has(stock.code)) continue;
-      const found = barOn(stock, date);
-      if (!found) continue;
-      let view = featuresAt(stock, found.index);
-      // 計測開始時点の軽量データが260本しかない場合でも、最新日のために
-      // buildStockEntry が計算済みの現在値を利用できる。
-      if (!view && found.index === stock.history.length - 1) view = stock;
-      if (!view) continue;
-      let score = null;
-      try { score = st.score(view); } catch { score = null; }
-      if (score == null || !Number.isFinite(score) || score <= 0) continue;
-      candidates.push({ code: stock.code, name: stock.name, score });
-    }
-    candidates.sort((a, b) => b.score - a.score);
-    ss.pending.push(...candidates.slice(0, 8).map((x) => ({ ...x, signalDate: date })));
   }
-
-  state.markets[market].lastProcessedAt = date;
+  state.version=VERSION;state.migratedAt||=new Date().toISOString();
 }
-
-function marketDates(universe, market) {
-  const dates = new Set();
-  for (const stock of universe) {
-    if (stock.market !== market) continue;
-    for (const bar of stock.history) if (bar.date) dates.add(bar.date);
+function advanceBenchmark(ms,market,date,stocks){
+  ms.benchmark||={value:1,lastDate:null};if(ms.benchmark.lastDate===date)return;
+  const rs=[];for(const s of stocks){if(s.market!==market)continue;const f=barOn(s,date);const prev=f?.index>0?s.history[f.index-1].c:null;if(prev>0&&f.bar.c>0)rs.push(f.bar.c/prev-1);}
+  ms.benchmark.value*=1+(rs.length?rs.reduce((a,b)=>a+b,0)/rs.length:0);ms.benchmark.lastDate=date;
+}
+function updateSignals(ss,date,byCode,bm){
+  for(const x of ss.signals){const s=byCode.get(x.code),f=s&&barOn(s,date);if(!f||!(x.signalClose>0))continue;const start=s.history.findIndex(b=>b.date===x.signalDate);if(start<0||f.index<start)continue;
+    const days=f.index-start;x.latestDate=date;x.latest=f.bar.c;x.elapsedDays=days;x.returnPct=f.bar.c/x.signalClose-1;x.mfe=Math.max(x.mfe||0,f.bar.h/x.signalClose-1);x.mae=Math.min(x.mae||0,f.bar.l/x.signalClose-1);x.path||=[];x.path.push(x.returnPct);if(x.path.length>60)x.path.shift();
+    for(const n of CHECKPOINTS)if(days>=n&&x.checkpoints?.[n]==null){x.checkpoints||={};const br=x.benchmarkEntry>0?bm/x.benchmarkEntry-1:0;x.checkpoints[n]={returnPct:x.returnPct,benchmarkReturn:br,excessReturn:x.returnPct-br};}
   }
-  return [...dates].sort();
 }
+function equity(pf,date,byCode){return pf.cash+pf.open.reduce((sum,p)=>{const s=byCode.get(p.code),f=s&&barOn(s,date);return sum+(f?.bar.c||p.last||p.entry)*p.shares;},0);}
+function close(pf,p,px,date,reason){pf.cash+=px*p.shares*(1-BT.cost/2);const pnl=(px-p.entry)*p.shares-p.entry*p.shares*BT.cost,r=pnl/(p.initialR*p.shares);pf.closed.push({...p,exitDate:date,exit:px,pnl,r,reason});if(pf.closed.length>LIMIT)pf.closed.shift();}
 
-export function updateForwardTests(store, universe) {
-  const state = store.forwardTest ||= { version: VERSION, startedAt: null, markets: {} };
-  if (state.version !== VERSION) throw new Error(`未対応の forwardTest version: ${state.version}`);
-
-  for (const market of ["JP", "US"]) {
-    const dates = marketDates(universe, market);
-    if (!dates.length) continue;
-    const latest = dates[dates.length - 1];
-    const marketState = state.markets?.[market];
-    // 初回は過去を後付けで「フォワード」と偽装せず、最新日から計測を始める。
-    const toProcess = marketState?.lastProcessedAt
-      ? dates.filter((d) => d > marketState.lastProcessedAt)
-      : [latest];
-    for (const date of toProcess) advanceForwardTestDay(state, market, date, universe);
-    state.startedAt ||= toProcess[0] || latest;
-  }
-  return summarizeForwardTests(state);
+export function advanceForwardTestDay(state,market,date,stocks,strategies=STRATEGIES){
+  state.version||=VERSION;state.markets||={};state.markets[market]||={lastProcessedAt:null,benchmark:{value:1,lastDate:null},strategies:{}};const ms=state.markets[market];advanceBenchmark(ms,market,date,stocks);const bm=ms.benchmark.value,byCode=new Map(stocks.map(s=>[s.code,s]));
+  for(const st of strategies.filter(s=>s.markets.includes(market))){const ss=strategyState(state,market,st.id),pf=ss.portfolio||=emptyPortfolio(date);pf.startedAt||=date;updateSignals(ss,date,byCode,bm);
+    const slots=Math.max(0,BT.maxPos-pf.open.length),pending=[...(pf.pending||[])].sort((a,b)=>b.score-a.score);
+    for(const item of pending.slice(0,slots)){const s=byCode.get(item.code),f=s&&barOn(s,date);if(!f||item.signalDate>=date)continue;const entry=f.bar.o,p=plan({...s,price:entry},st),initialR=entry-p.stop;if(!(entry>0&&initialR>0))continue;let shares=Math.floor((equity(pf,date,byCode)*BT.riskPct)/initialR);shares=Math.min(shares,Math.floor(pf.cash/(entry*(1+BT.cost/2))));if(shares<=0)continue;pf.cash-=shares*entry*(1+BT.cost/2);pf.open.push({code:s.code,name:s.name,signalDate:item.signalDate,entryDate:date,entry,stop:p.stop,target:p.target,initialR,shares,days:0,last:entry,currentR:-BT.cost,returnPct:-BT.cost,mfe:0,mae:0,path:[0]});}
+    pf.pending=[];const survivors=[];
+    for(const p of pf.open){const s=byCode.get(p.code),f=s&&barOn(s,date);if(!f){survivors.push(p);continue;}const {bar,index}=f;if(date!==p.entryDate)p.days++;p.last=bar.c;p.returnPct=bar.c/p.entry-1;p.currentR=(bar.c-p.entry-p.entry*BT.cost)/p.initialR;p.mfe=Math.max(p.mfe||0,bar.h/p.entry-1);p.mae=Math.min(p.mae||0,bar.l/p.entry-1);p.path||=[];p.path.push(p.returnPct);if(p.path.length>60)p.path.shift();let reason=null,px=null;if(bar.l<=p.stop){reason="損切り";px=Math.min(p.stop,bar.o);}else if(bar.h>=p.target){reason="利確";px=p.target;}else{const n=st.horizon==="swing"?10:st.horizon==="mid"?50:200;if(p.days>n&&index+1>=n){const w=s.history.slice(index-n+1,index+1),ma=w.reduce((a,x)=>a+x.c,0)/w.length;if(bar.c<ma){reason="トレンド転換";px=bar.c;}}if(!reason&&bar.c>p.entry+p.initialR&&p.stop<p.entry)p.stop=p.entry;}if(reason)close(pf,p,px,date,reason);else survivors.push(p);}
+    pf.open=survivors;const eq=equity(pf,date,byCode);pf.peak=Math.max(pf.peak||BT.capital,eq);pf.maxDD=Math.min(pf.maxDD||0,eq/pf.peak-1);pf.equityCurve.push({date,equity:eq});if(pf.equityCurve.length>520)pf.equityCurve.shift();
+    const candidates=[];for(const s of stocks){if(s.market!==market)continue;const f=barOn(s,date);if(!f)continue;let view=featuresAt(s,f.index);if(!view&&f.index===s.history.length-1)view=s;if(!view)continue;let score=null;try{score=st.score(view);}catch{}if(score!=null&&Number.isFinite(score)&&score>0)candidates.push({code:s.code,name:s.name,score,close:f.bar.c});}candidates.sort((a,b)=>b.score-a.score);
+    for(const x of candidates.slice(0,8))if(!ss.signals.some(s=>s.code===x.code&&s.signalDate===date))ss.signals.push({code:x.code,name:x.name,signalDate:date,signalClose:x.close,benchmarkEntry:bm,latestDate:date,latest:x.close,elapsedDays:0,returnPct:0,checkpoints:{},mfe:0,mae:0,path:[0]});
+    const active=new Set(pf.open.map(x=>x.code));pf.pending=candidates.slice(0,8).filter(x=>!active.has(x.code)).map(x=>({...x,signalDate:date}));
+  }ms.lastProcessedAt=date;
 }
-
-export function summarizeForwardTests(state) {
-  const out = { computedAt: new Date().toISOString().slice(0, 10), startedAt: state.startedAt, markets: {} };
-  for (const [market, marketState] of Object.entries(state.markets || {})) {
-    const strategies = {};
-    for (const [stId, ss] of Object.entries(marketState.strategies || {})) {
-      const s = ss.stats || emptyStats();
-      strategies[stId] = {
-        closedCount: s.closedCount,
-        activeCount: (ss.open || []).length,
-        pendingCount: (ss.pending || []).length,
-        winRate: s.closedCount ? s.wins / s.closedCount : null,
-        avgR: s.closedCount ? s.sumR / s.closedCount : null,
-        pf: s.grossLossR > 0 ? s.grossProfitR / s.grossLossR : (s.grossProfitR > 0 ? null : 0),
-        pfInfinite: s.grossLossR === 0 && s.grossProfitR > 0,
-        maxDD: s.maxDD,
-      };
-    }
-    out.markets[market] = { asof: marketState.lastProcessedAt, strategies };
-  }
-  return out;
-}
-
+function marketDates(universe,market){const dates=new Set();for(const s of universe)if(s.market===market)for(const b of s.history)if(b.date)dates.add(b.date);return [...dates].sort();}
+export function updateForwardTests(store,universe){const state=store.forwardTest||={version:VERSION,startedAt:null,markets:{}};migrate(state);for(const market of ["JP","US"]){const dates=marketDates(universe,market);if(!dates.length)continue;const latest=dates.at(-1),last=state.markets?.[market]?.lastProcessedAt,toProcess=last?dates.filter(d=>d>last):[latest];for(const date of toProcess)advanceForwardTestDay(state,market,date,universe);state.startedAt||=toProcess[0]||latest;}return summarizeForwardTests(state);}
+function portfolioMetrics(pf){const curve=pf.equityCurve||[],eq=curve.at(-1)?.equity??pf.initialCapital,rs=curve.slice(1).map((x,i)=>x.equity/curve[i].equity-1).filter(Number.isFinite),mean=rs.length?rs.reduce((a,b)=>a+b,0)/rs.length:0,v=rs.length>1?rs.reduce((a,x)=>a+(x-mean)**2,0)/(rs.length-1):0,closed=pf.closed||[],years=Math.max(curve.length/252,1/252);return{startedAt:pf.startedAt,initialCapital:pf.initialCapital,equity:eq,cash:pf.cash,totalReturn:eq/pf.initialCapital-1,cagr:Math.pow(eq/pf.initialCapital,1/years)-1,maxDD:pf.maxDD||0,sharpe:v>0?mean/Math.sqrt(v)*Math.sqrt(252):null,activeCount:pf.open.length,pendingCount:pf.pending.length,closedCount:closed.length,winRate:closed.length?closed.filter(x=>x.pnl>0).length/closed.length:null,tracked:[...pf.open.map(x=>({status:"open",...x})),...pf.pending.map(x=>({status:"pending",...x}))],recentClosed:closed.slice(-15).reverse().map(x=>({status:"closed",...x})),equityCurve:curve.slice(-260)};}
+function signalMetrics(signals){const checkpoints={};for(const n of CHECKPOINTS){const rows=signals.map(s=>s.checkpoints?.[n]).filter(Boolean);checkpoints[n]={count:rows.length,avgReturn:rows.length?rows.reduce((a,x)=>a+x.returnPct,0)/rows.length:null,avgExcess:rows.length?rows.reduce((a,x)=>a+x.excessReturn,0)/rows.length:null,winRate:rows.length?rows.filter(x=>x.excessReturn>0).length/rows.length:null};}return{totalSignals:signals.length,checkpoints,avgMfe:signals.length?signals.reduce((a,x)=>a+(x.mfe||0),0)/signals.length:null,avgMae:signals.length?signals.reduce((a,x)=>a+(x.mae||0),0)/signals.length:null,recent:signals.slice(-20).reverse()};}
+export function summarizeForwardTests(state){const out={version:VERSION,computedAt:new Date().toISOString().slice(0,10),startedAt:state.startedAt,rules:{capital:BT.capital,riskPct:BT.riskPct,maxPositions:BT.maxPos,roundTripCost:BT.cost,checkpoints:CHECKPOINTS},markets:{}};for(const [market,ms]of Object.entries(state.markets||{})){const strategies={};for(const [id,ss]of Object.entries(ms.strategies||{}))strategies[id]={signalQuality:signalMetrics(ss.signals||[]),portfolio:portfolioMetrics(ss.portfolio||emptyPortfolio())};out.markets[market]={asof:ms.lastProcessedAt,benchmark:ms.benchmark?.value,strategies};}return out;}

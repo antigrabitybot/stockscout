@@ -1,46 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { advanceForwardTestDay, summarizeForwardTests, updateForwardTests } from "./forward-test.mjs";
-
-const strategy = {
-  id: "always", name: "Always", cat: "value", horizon: "swing", markets: ["JP"],
-  score: () => 1,
-};
-
-function stock(days = 262) {
-  const history = [];
-  const start = new Date("2025-01-01T00:00:00Z");
-  for (let i = 0; i < days; i++) {
-    const date = new Date(start.getTime() + i * 86400_000).toISOString().slice(0, 10);
-    history.push({ date, o: 100, h: 101, l: 99, c: 100, v: 1000 });
-  }
-  return { code: "TEST", name: "Test", market: "JP", price: 100, atr: 1, history };
-}
-
-test("signal is entered next day and a closed trade updates metrics", () => {
-  const s = stock();
-  const state = { version: 1, startedAt: null, markets: {} };
-  const signalDate = s.history[260].date;
-  const entryDate = s.history[261].date;
-
-  advanceForwardTestDay(state, "JP", signalDate, [s], [strategy]);
-  assert.equal(state.markets.JP.strategies.always.pending.length, 1);
-  assert.equal(state.markets.JP.strategies.always.open.length, 0);
-
-  s.history[261] = { ...s.history[261], h: 110, l: 99 };
-  advanceForwardTestDay(state, "JP", entryDate, [s], [strategy]);
-  const result = summarizeForwardTests(state).markets.JP.strategies.always;
-  assert.equal(result.closedCount, 1);
-  assert.equal(result.winRate, 1);
-  assert.ok(result.avgR > 0);
-});
-
-test("running the updater twice for the same latest date is idempotent", () => {
-  const s = stock(261);
-  const store = {};
-  updateForwardTests(store, [s]);
-  const once = JSON.stringify(store.forwardTest);
-  updateForwardTests(store, [s]);
-  assert.equal(JSON.stringify(store.forwardTest), once);
-});
-
+const strategy={id:"always",name:"Always",cat:"value",horizon:"swing",markets:["JP"],score:()=>1};
+function stock(code="TEST",days=267){const history=[],start=new Date("2025-01-01T00:00:00Z");for(let i=0;i<days;i++){const date=new Date(start.getTime()+i*86400_000).toISOString().slice(0,10);history.push({date,o:100,h:101,l:99,c:100,v:1000});}return{code,name:code,market:"JP",price:100,atr:1,history};}
+test("signal is stored, entered next day, and account capital constrains position",()=>{const s=stock(),state={version:2,startedAt:null,markets:{}};const d0=s.history[260].date,d1=s.history[261].date;advanceForwardTestDay(state,"JP",d0,[s],[strategy]);let ss=state.markets.JP.strategies.always;assert.equal(ss.signals.length,1);assert.equal(ss.portfolio.pending.length,1);assert.equal(ss.portfolio.open.length,0);advanceForwardTestDay(state,"JP",d1,[s],[strategy]);ss=state.markets.JP.strategies.always;assert.equal(ss.portfolio.open.length,1);assert.equal(ss.portfolio.open[0].shares,6250);assert.ok(ss.portfolio.cash>=0);assert.ok(ss.portfolio.cash<1_000_000);});
+test("five-day checkpoint records return and benchmark-relative return",()=>{const s=stock(),bm=stock("BM"),state={version:2,startedAt:null,markets:{}};for(let i=260;i<=265;i++){s.history[i]={...s.history[i],c:100+(i-260)*2,h:101+(i-260)*2};advanceForwardTestDay(state,"JP",s.history[i].date,[s,bm],[strategy]);}const q=summarizeForwardTests(state).markets.JP.strategies.always.signalQuality;assert.equal(q.checkpoints[5].count,2);assert.ok(q.checkpoints[5].avgReturn>0);assert.ok(Number.isFinite(q.checkpoints[5].avgExcess));});
+test("version 1 state migrates without discarding legacy records",()=>{const s=stock("OLD",261),last=s.history[260].date,store={forwardTest:{version:1,startedAt:last,markets:{JP:{lastProcessedAt:last,strategies:{always:{pending:[{code:"OLD",name:"Old",signalDate:last,score:1}],open:[],stats:{closedCount:0},recentClosed:[]}}}}}};updateForwardTests(store,[s]);assert.equal(store.forwardTest.version,2);assert.equal(store.forwardTest.markets.JP.strategies.always.signals.length,1);assert.ok(store.forwardTest.markets.JP.strategies.always.legacy);});
+test("running updater twice for same latest date is idempotent",()=>{const s=stock("IDEM",261),store={};updateForwardTests(store,[s]);const once=JSON.stringify(store.forwardTest);updateForwardTests(store,[s]);assert.equal(JSON.stringify(store.forwardTest),once);});
