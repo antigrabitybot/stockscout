@@ -22,6 +22,24 @@ function migrate(state){
   }
   state.version=VERSION;state.migratedAt||=new Date().toISOString();
 }
+function hydrateLegacyAccounts(state){
+  if(state.legacyHydrated)return;
+  for(const ms of Object.values(state.markets||{}))for(const ss of Object.values(ms.strategies||{})){
+    const pf=ss.portfolio||=emptyPortfolio(ms.lastProcessedAt||state.startedAt);
+    if(!pf.open.length&&!pf.equityCurve.length&&ss.legacy){
+      for(const old of (ss.legacy.open||[]).slice(0,BT.maxPos)){
+        if(!(old.entry>0&&old.initialR>0))continue;
+        let shares=Math.floor((BT.capital*BT.riskPct)/old.initialR);
+        shares=Math.min(shares,Math.floor(pf.cash/(old.entry*(1+BT.cost/2))));
+        if(shares<=0)continue;
+        pf.cash-=shares*old.entry*(1+BT.cost/2);
+        pf.open.push({...old,shares,last:old.entry,returnPct:0,currentR:-BT.cost,mfe:0,mae:0,path:[0]});
+      }
+      pf.pending=(ss.legacy.pending||[]).map(x=>({...x}));
+    }
+  }
+  state.legacyHydrated=true;
+}
 function advanceBenchmark(ms,market,date,stocks){
   ms.benchmark||={value:1,lastDate:null};if(ms.benchmark.lastDate===date)return;
   const rs=[];for(const s of stocks){if(s.market!==market)continue;const f=barOn(s,date);const prev=f?.index>0?s.history[f.index-1].c:null;if(prev>0&&f.bar.c>0)rs.push(f.bar.c/prev-1);}
@@ -50,7 +68,7 @@ export function advanceForwardTestDay(state,market,date,stocks,strategies=STRATE
   }ms.lastProcessedAt=date;
 }
 function marketDates(universe,market){const dates=new Set();for(const s of universe)if(s.market===market)for(const b of s.history)if(b.date)dates.add(b.date);return [...dates].sort();}
-export function updateForwardTests(store,universe){const state=store.forwardTest||={version:VERSION,startedAt:null,markets:{}};migrate(state);for(const market of ["JP","US"]){const dates=marketDates(universe,market);if(!dates.length)continue;const latest=dates.at(-1),last=state.markets?.[market]?.lastProcessedAt,toProcess=last?dates.filter(d=>d>last):[latest];for(const date of toProcess)advanceForwardTestDay(state,market,date,universe);state.startedAt||=toProcess[0]||latest;}return summarizeForwardTests(state);}
+export function updateForwardTests(store,universe){const state=store.forwardTest||={version:VERSION,startedAt:null,markets:{}};migrate(state);hydrateLegacyAccounts(state);for(const market of ["JP","US"]){const dates=marketDates(universe,market);if(!dates.length)continue;const latest=dates.at(-1),last=state.markets?.[market]?.lastProcessedAt,toProcess=last?dates.filter(d=>d>last):[latest];for(const date of toProcess)advanceForwardTestDay(state,market,date,universe);state.startedAt||=toProcess[0]||latest;}return summarizeForwardTests(state);}
 function portfolioMetrics(pf){const curve=pf.equityCurve||[],eq=curve.at(-1)?.equity??pf.initialCapital,rs=curve.slice(1).map((x,i)=>x.equity/curve[i].equity-1).filter(Number.isFinite),mean=rs.length?rs.reduce((a,b)=>a+b,0)/rs.length:0,v=rs.length>1?rs.reduce((a,x)=>a+(x-mean)**2,0)/(rs.length-1):0,closed=pf.closed||[],years=Math.max(curve.length/252,1/252);return{startedAt:pf.startedAt,initialCapital:pf.initialCapital,equity:eq,cash:pf.cash,totalReturn:eq/pf.initialCapital-1,cagr:Math.pow(eq/pf.initialCapital,1/years)-1,maxDD:pf.maxDD||0,sharpe:v>0?mean/Math.sqrt(v)*Math.sqrt(252):null,activeCount:pf.open.length,pendingCount:pf.pending.length,closedCount:closed.length,winRate:closed.length?closed.filter(x=>x.pnl>0).length/closed.length:null,tracked:[...pf.open.map(x=>({status:"open",...x})),...pf.pending.map(x=>({status:"pending",...x}))],recentClosed:closed.slice(-15).reverse().map(x=>({status:"closed",...x})),equityCurve:curve.slice(-260)};}
 function signalMetrics(signals){const checkpoints={};for(const n of CHECKPOINTS){const rows=signals.map(s=>s.checkpoints?.[n]).filter(Boolean);checkpoints[n]={count:rows.length,avgReturn:rows.length?rows.reduce((a,x)=>a+x.returnPct,0)/rows.length:null,avgExcess:rows.length?rows.reduce((a,x)=>a+x.excessReturn,0)/rows.length:null,winRate:rows.length?rows.filter(x=>x.excessReturn>0).length/rows.length:null};}return{totalSignals:signals.length,checkpoints,avgMfe:signals.length?signals.reduce((a,x)=>a+(x.mfe||0),0)/signals.length:null,avgMae:signals.length?signals.reduce((a,x)=>a+(x.mae||0),0)/signals.length:null,recent:signals.slice(-20).reverse()};}
 export function summarizeForwardTests(state){const out={version:VERSION,computedAt:new Date().toISOString().slice(0,10),startedAt:state.startedAt,rules:{capital:BT.capital,riskPct:BT.riskPct,maxPositions:BT.maxPos,roundTripCost:BT.cost,checkpoints:CHECKPOINTS},markets:{}};for(const [market,ms]of Object.entries(state.markets||{})){const strategies={};for(const [id,ss]of Object.entries(ms.strategies||{}))strategies[id]={signalQuality:signalMetrics(ss.signals||[]),portfolio:portfolioMetrics(ss.portfolio||emptyPortfolio())};out.markets[market]={asof:ms.lastProcessedAt,benchmark:ms.benchmark?.value,strategies};}return out;}
