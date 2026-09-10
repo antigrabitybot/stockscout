@@ -1,5 +1,40 @@
 # StockScout — セットアップ手順
 
+## 予測ページ（2026-09-10）
+
+下部の「予測」から日経平均と収録日本株を検索できます。
+TimesFM 2.5で1・5・20営業日先の予測終値、騰落率、10〜90分位点を表示します。
+検索範囲は価格ストアに収録された銘柄で、全上場銘柄のオンデマンド取得ではありません。
+128営業日未満の履歴、欠損・不正値は理由付きで対象外になります。
+
+日本株はJ-Quantsの保存済み調整後終値、日経平均はYahoo Financeの `^N225` を使います。
+日経平均をETFで代用していません。Yahooの配信口は非保証であり、取得失敗時には
+日経平均の予測を「取得できませんでした」と表示します。個別株は継続して生成します。
+株式分割時にストアの過去調整価格が一貫しているかは取得側の制約です。
+
+モデルには直近512点までの対数価格（基準終値で正規化）を入力します。
+各将来時点の価格分位点を直接逆変換し、日次リターン分位点を足し合わせません。
+予測レンジの日本株における被覆率、方向的中率、収益性は未検証です。
+既存46手法の判定・成績には含めません。Apache-2.0の2.5重みを使用します。
+
+`StockScout Forecast` は日次更新成功後に実行されます。Actions画面から手動実行も可能です。
+独立したジョブなので予測失敗時も通常の株価更新は反映され、以前の予測は基準日付きで残ります。
+Python 3.12 / CPU環境を使用し、API推論料金はありません。実行時間はActions利用枠に依存します。
+入力履歴は `.state/` にのみ書き、公開JSONは予測結果と基準価格のみを保存します。
+
+ローカル実行（先に `store/price-store.json.gz` を配置）：
+
+```sh
+python3 -m venv .venv-forecast
+.venv-forecast/bin/python -m pip install -r batch/requirements-forecast.txt
+STORE_BACKEND=local node batch/forecast-input.mjs
+.venv-forecast/bin/python batch/forecast.py
+.venv-forecast/bin/python -m unittest discover -s batch -p test_forecast.py
+npm run build
+```
+
+`--limit 2 --output .state/forecast-smoke.json` で公開ファイルを変更せず小規模検証できます。
+
 ## 最初にお読みください: このコードの検証状況
 
 このコード一式は、開発サンドボックスのネットワーク制限(`api.jquants.com` /

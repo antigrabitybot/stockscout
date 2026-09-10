@@ -1,0 +1,2 @@
+timesfm[torch]==2.0.2
+certifi>=2024.2.2

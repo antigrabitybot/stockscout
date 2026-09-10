@@ -51,7 +51,7 @@ function main() {
 
   let body = src.slice(0, cut);
   // React の import 行(Node には不要)を除去
-  body = body.replace(/^import .*$/m, "");
+  body = body.replace(/^import .*$/gm, "");
 
   const header = `/**
  * logic.mjs — 自動生成ファイル。直接編集しないこと。

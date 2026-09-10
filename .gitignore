@@ -9,3 +9,5 @@ store/
 # portfolio.json
 
 .vercel
+.venv-forecast/
+__pycache__/

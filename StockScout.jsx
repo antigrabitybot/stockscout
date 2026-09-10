@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import ForecastPage from "./src/ForecastPage.jsx";
 
 /* ============================================================================
    StockScout v0.1 — 日米株 マルチ手法スクリーニング & フォワードテスト
@@ -2603,6 +2604,7 @@ export default function StockScout() {
       </div>
 
       <div className="wrap">
+        {tab === "forecast" && <ForecastPage universe={snap.universe} asof={snap.asof} />}
         {/* ==================== ダッシュボード ==================== */}
         {tab === "dash" && (
           <>
@@ -3574,7 +3576,7 @@ export default function StockScout() {
 
       {/* ==================== ナビ ==================== */}
       <div className="nav">
-        {[["dash", "◎", "推薦"], ["watch", "▤", "登録銘柄"], ["pf", "◆", "保有"], ["demo", "▲", "デモ運用"], ["perf", "◫", "手法比較"], ["set", "⚙", "設定"]].map(([k, i, l]) => (
+        {[["dash", "◎", "推薦"], ["forecast", "↗", "予測"], ["watch", "▤", "登録銘柄"], ["pf", "◆", "保有"], ["demo", "▲", "デモ運用"], ["perf", "◫", "手法比較"], ["set", "⚙", "設定"]].map(([k, i, l]) => (
           <button key={k} data-on={tab === k ? 1 : 0} onClick={() => setTab(k)}>
             <b>{i}</b>{l}
             {((k === "pf" && unseenPf > 0) || (k === "watch" && unseenWatch > 0)) && <span className="badge" />}
